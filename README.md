@@ -10,22 +10,23 @@ When a developer approves a trap command, AgentsAegis blocks execution before an
 
 ## Install
 
-Build from source (requires Go 1.22+):
+One-liner:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/agentsaegis/go-proxy/main/install.sh | sh
+```
+
+Homebrew:
+
+```bash
+brew install agentsaegis/tap/agentsaegis
+```
+
+Or with Go:
 
 ```bash
 go install github.com/agentsaegis/go-proxy/cmd/agentsaegis@latest
 ```
-
-Or clone and build:
-
-```bash
-git clone https://github.com/agentsaegis/go-proxy.git
-cd go-proxy
-make build
-./bin/agentsaegis --help
-```
-
-Homebrew coming soon.
 
 ## Quick start
 

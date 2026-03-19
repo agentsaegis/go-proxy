@@ -8,10 +8,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var version = "dev"
+
 var rootCmd = &cobra.Command{
-	Use:   "agentsaegis",
-	Short: "AgentsAegis - AI security awareness testing for developers",
-	Long:  "AgentsAegis tests whether developers read what they approve from AI coding agents.",
+	Use:     "agentsaegis",
+	Short:   "AgentsAegis - AI security awareness testing for developers",
+	Long:    "AgentsAegis tests whether developers read what they approve from AI coding agents.",
+	Version: version,
 }
 
 func main() {
