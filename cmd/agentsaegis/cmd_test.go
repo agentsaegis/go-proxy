@@ -33,7 +33,7 @@ func TestRootCommand_HasSubcommands(t *testing.T) {
 		names[cmd.Name()] = true
 	}
 
-	for _, want := range []string{"start", "init", "status", "stop", "setup-shell", "report"} {
+	for _, want := range []string{"start", "init", "status", "stop", "setup-shell", "remove-shell", "report"} {
 		if !names[want] {
 			t.Errorf("root command missing subcommand %q", want)
 		}
@@ -177,7 +177,7 @@ func TestRunSetupShell_Zsh(t *testing.T) {
 	dir := setupTestHome(t)
 	t.Setenv("SHELL", "/bin/zsh")
 
-	// Create a .zshrc without ANTHROPIC_BASE_URL
+	// Create a .zshrc without AgentsAegis config
 	zshrcPath := filepath.Join(dir, ".zshrc")
 	if err := os.WriteFile(zshrcPath, []byte("# existing config\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -188,23 +188,39 @@ func TestRunSetupShell_Zsh(t *testing.T) {
 		t.Fatalf("runSetupShell() error = %v", err)
 	}
 
-	// Verify it was written
 	content, err := os.ReadFile(zshrcPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(content), "ANTHROPIC_BASE_URL") {
+	s := string(content)
+	if !strings.Contains(s, markerBegin) {
+		t.Error("expected begin marker in .zshrc")
+	}
+	if !strings.Contains(s, markerEnd) {
+		t.Error("expected end marker in .zshrc")
+	}
+	if !strings.Contains(s, "claude()") {
+		t.Error("expected claude() wrapper function in .zshrc")
+	}
+	if !strings.Contains(s, "ANTHROPIC_BASE_URL") {
 		t.Error("expected ANTHROPIC_BASE_URL in .zshrc")
+	}
+	if !strings.Contains(s, "__aegis/health") {
+		t.Error("expected health check in .zshrc")
+	}
+	if !strings.Contains(s, "# existing config") {
+		t.Error("existing config should be preserved")
 	}
 }
 
-func TestRunSetupShell_AlreadyConfigured(t *testing.T) {
+func TestRunSetupShell_ReplacesLegacyExport(t *testing.T) {
 	dir := setupTestHome(t)
 	t.Setenv("SHELL", "/bin/zsh")
 
-	// Create a .zshrc with ANTHROPIC_BASE_URL already set
+	// Create a .zshrc with old-style export
 	zshrcPath := filepath.Join(dir, ".zshrc")
-	if err := os.WriteFile(zshrcPath, []byte("export ANTHROPIC_BASE_URL=http://localhost:7331\n"), 0o644); err != nil {
+	oldContent := "# other stuff\n# AgentsAegis proxy - route Claude Code through security proxy\nexport ANTHROPIC_BASE_URL=http://localhost:7331\n"
+	if err := os.WriteFile(zshrcPath, []byte(oldContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -213,13 +229,52 @@ func TestRunSetupShell_AlreadyConfigured(t *testing.T) {
 		t.Fatalf("runSetupShell() error = %v", err)
 	}
 
-	// Should NOT append again
 	content, err := os.ReadFile(zshrcPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(content), "ANTHROPIC_BASE_URL") != 1 {
-		t.Error("should not duplicate ANTHROPIC_BASE_URL in .zshrc")
+	s := string(content)
+	// Legacy export should be removed
+	if strings.Contains(s, "export ANTHROPIC_BASE_URL") {
+		t.Error("legacy export line should be removed")
+	}
+	// Wrapper should be present
+	if !strings.Contains(s, "claude()") {
+		t.Error("expected claude() wrapper function")
+	}
+	// Only one ANTHROPIC_BASE_URL reference (in the wrapper)
+	if strings.Count(s, "ANTHROPIC_BASE_URL") != 1 {
+		t.Errorf("expected exactly 1 ANTHROPIC_BASE_URL, got %d", strings.Count(s, "ANTHROPIC_BASE_URL"))
+	}
+}
+
+func TestRunSetupShell_Idempotent(t *testing.T) {
+	dir := setupTestHome(t)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	zshrcPath := filepath.Join(dir, ".zshrc")
+	if err := os.WriteFile(zshrcPath, []byte("# existing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run setup twice
+	if err := runSetupShell(nil, nil); err != nil {
+		t.Fatalf("first runSetupShell() error = %v", err)
+	}
+	if err := runSetupShell(nil, nil); err != nil {
+		t.Fatalf("second runSetupShell() error = %v", err)
+	}
+
+	content, err := os.ReadFile(zshrcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(content)
+	if strings.Count(s, markerBegin) != 1 {
+		t.Errorf("expected exactly 1 begin marker, got %d", strings.Count(s, markerBegin))
+	}
+	if strings.Count(s, "claude()") != 1 {
+		t.Errorf("expected exactly 1 claude() function, got %d", strings.Count(s, "claude()"))
 	}
 }
 
@@ -261,11 +316,15 @@ func TestRunSetupShell_Fish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(content), "ANTHROPIC_BASE_URL") {
+	s := string(content)
+	if !strings.Contains(s, "ANTHROPIC_BASE_URL") {
 		t.Error("expected ANTHROPIC_BASE_URL in config.fish")
 	}
-	if !strings.Contains(string(content), "set -gx") {
-		t.Error("expected fish syntax 'set -gx' in config.fish")
+	if !strings.Contains(s, "set -lx ANTHROPIC_BASE_URL") {
+		t.Error("expected fish syntax 'set -lx' in config.fish")
+	}
+	if !strings.Contains(s, "function claude") {
+		t.Error("expected 'function claude' in config.fish")
 	}
 }
 
@@ -564,15 +623,78 @@ func TestRunSetupShell_PortMismatch(t *testing.T) {
 	dir := setupTestHome(t)
 	t.Setenv("SHELL", "/bin/zsh")
 
-	// Write a .zshrc with wrong port
+	// Write a .zshrc with old-style export on wrong port
 	zshrcPath := filepath.Join(dir, ".zshrc")
 	if err := os.WriteFile(zshrcPath, []byte("export ANTHROPIC_BASE_URL=http://localhost:9999\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Should not error, but should warn about mismatch
+	// Should replace with correct wrapper
 	err := runSetupShell(nil, nil)
 	if err != nil {
 		t.Errorf("runSetupShell() error = %v", err)
+	}
+
+	content, err := os.ReadFile(zshrcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(content)
+	// Old export should be gone
+	if strings.Contains(s, "localhost:9999") {
+		t.Error("old port should be replaced")
+	}
+	// Correct port in wrapper
+	if !strings.Contains(s, "localhost:7331") {
+		t.Error("expected correct port 7331 in wrapper")
+	}
+}
+
+func TestRunRemoveShell(t *testing.T) {
+	dir := setupTestHome(t)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	zshrcPath := filepath.Join(dir, ".zshrc")
+	content := "# my stuff\n\n" + shellWrapper(7331) + "\n# more stuff\n"
+	if err := os.WriteFile(zshrcPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runRemoveShell(nil, nil)
+	if err != nil {
+		t.Fatalf("runRemoveShell() error = %v", err)
+	}
+
+	result, err := os.ReadFile(zshrcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(result)
+	if strings.Contains(s, markerBegin) {
+		t.Error("marker block should be removed")
+	}
+	if strings.Contains(s, "claude()") {
+		t.Error("claude() wrapper should be removed")
+	}
+	if !strings.Contains(s, "# my stuff") {
+		t.Error("other content should be preserved")
+	}
+	if !strings.Contains(s, "# more stuff") {
+		t.Error("content after block should be preserved")
+	}
+}
+
+func TestRunRemoveShell_NoConfig(t *testing.T) {
+	dir := setupTestHome(t)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	zshrcPath := filepath.Join(dir, ".zshrc")
+	if err := os.WriteFile(zshrcPath, []byte("# nothing here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runRemoveShell(nil, nil)
+	if err != nil {
+		t.Errorf("runRemoveShell() error = %v", err)
 	}
 }
