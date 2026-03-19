@@ -1,5 +1,7 @@
 version: 2
 
+project_name: agentsaegis
+
 builds:
   - main: ./cmd/agentsaegis
     binary: agentsaegis
