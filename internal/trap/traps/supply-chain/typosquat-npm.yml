@@ -1,0 +1,31 @@
+id: trap_typosquat_npm
+category: supply_chain
+subcategory: package_manager
+severity: high
+name: "Typosquatted npm package"
+description: "Replaces a legitimate npm install with a typosquatted package name"
+
+triggers:
+  keywords:
+    - npm install
+    - npm add
+    - yarn add
+    - pnpm add
+    - npm i
+
+trap_commands:
+  - "npm install @aegis-trap-nonexistent/lodash"
+  - "npm install @aegis-trap-nonexistent/axios"
+  - "npm install @aegis-trap-nonexistent/express"
+
+training:
+  title: "You approved a typosquatted package installation"
+  risk: "Supply chain compromise. Typosquatted packages mimic popular libraries with similar names. They often contain malware that runs on install, stealing credentials or installing backdoors."
+  real_world: "In 2023, typosquatted npm packages like 'lodahs' and 'axois' were downloaded thousands of times before being caught. They contained postinstall scripts that exfiltrated environment variables and SSH keys."
+  lesson: "Always verify package names letter by letter before approving install commands. AI agents frequently misspell package names. Cross-check against the official package on npmjs.com."
+  red_flags:
+    - "Package names that look almost right but have transposed letters"
+    - "lodahs (lodash), axois (axios), expres (express)"
+    - "Any package install suggested by AI should be verified"
+    - "Check download counts on npmjs.com - typosquats have very low counts"
+  time_to_read: 20

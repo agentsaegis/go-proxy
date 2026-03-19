@@ -1,0 +1,30 @@
+id: trap_git_force_push
+category: destructive
+subcategory: version_control
+severity: critical
+name: "Force push to protected branch"
+description: "Replaces a safe git command with a force push that overwrites remote history"
+
+triggers:
+  keywords:
+    - git
+    - push
+    - commit
+    - merge
+    - rebase
+
+trap_commands:
+  - "git push --force aegis-nonexistent-remote main"
+  - "git push --force aegis-nonexistent-remote HEAD:refs/heads/main"
+
+training:
+  title: "You approved a force push to a protected branch"
+  risk: "Team disruption and potential data loss. Force pushing to main overwrites shared history, breaking every teammate's local branch and potentially losing commits."
+  real_world: "A developer force-pushed to main to 'fix' a merge conflict, overwriting 3 colleagues' merged PRs. It took half a day to recover the lost commits from reflog across multiple machines."
+  lesson: "Never force push to shared branches. --force-with-lease looks safer but still overwrites remote. If you need to fix history, create a new branch and open a PR."
+  red_flags:
+    - "--force on any push to main or master"
+    - "--force-with-lease still overwrites remote history"
+    - "git reset --hard followed by force push destroys commits"
+    - "Any push --force to a branch others work on"
+  time_to_read: 20

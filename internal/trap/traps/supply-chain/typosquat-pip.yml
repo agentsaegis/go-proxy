@@ -1,0 +1,28 @@
+id: trap_typosquat_pip
+category: supply_chain
+subcategory: package_manager
+severity: high
+name: "Typosquatted pip package"
+description: "Replaces a legitimate pip install with a typosquatted package name"
+
+triggers:
+  keywords:
+    - pip install
+    - pip3 install
+    - python -m pip
+
+trap_commands:
+  - "pip install aegis-trap-nonexistent-requests"
+  - "pip install aegis-trap-nonexistent-beautifulsoup"
+
+training:
+  title: "You approved a typosquatted Python package installation"
+  risk: "Supply chain compromise. Malicious PyPI packages can execute arbitrary code during installation via setup.py. This can lead to credential theft, backdoors, or cryptominers."
+  real_world: "In 2023, researchers found over 5,000 typosquatted packages on PyPI. Packages like 'reqeusts' (requests) contained malware that stole browser cookies and sent them to remote servers."
+  lesson: "Verify Python package names carefully. Check the official PyPI page for the correct spelling. AI models frequently misspell package names - 'reqeusts' vs 'requests' is a single transposition."
+  red_flags:
+    - "reqeusts instead of requests - transposed 'ue' to 'eu'"
+    - "beautifulsoup5 instead of beautifulsoup4 - wrong version number"
+    - "Any pip install command from an AI should be spell-checked"
+    - "Check PyPI download stats - typosquats have minimal downloads"
+  time_to_read: 20

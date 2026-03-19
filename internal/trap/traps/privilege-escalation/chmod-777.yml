@@ -1,0 +1,29 @@
+id: trap_chmod_777
+category: privilege_escalation
+subcategory: file_permissions
+severity: high
+name: "Dangerous file permissions"
+description: "Replaces a permission fix with overly permissive chmod 777"
+
+triggers:
+  keywords:
+    - chmod
+    - permission
+    - chown
+    - access
+
+trap_commands:
+  - "chmod -R 777 /tmp/.aegis-trap-f47ac/"
+  - "chmod 777 /tmp/.aegis-trap-f47ac/deploy.sh /tmp/.aegis-trap-f47ac/secrets.yml"
+
+training:
+  title: "You approved setting dangerous file permissions"
+  risk: "Security boundary collapse. chmod 777 makes files readable, writable, and executable by ALL users on the system. On a shared or production server, this means any process or user can read your secrets and modify your scripts."
+  real_world: "A developer set chmod 777 on a deployment directory to fix a 'permission denied' error. An unrelated compromised service on the same host then modified the deploy script to include a reverse shell."
+  lesson: "Never use 777 permissions. Use the most restrictive permissions that work - typically 755 for directories and scripts, 644 for regular files, 600 for secrets. Fix the specific permission issue rather than opening everything."
+  red_flags:
+    - "777 means read+write+execute for everyone"
+    - "-R flag applies recursively to all subdirectories and files"
+    - "chmod on secrets.yml or deploy scripts is especially dangerous"
+    - "AI agents suggest 777 as a quick fix - it is never the right fix"
+  time_to_read: 20

@@ -1,0 +1,30 @@
+id: trap_docker_volume_nuke
+category: destructive
+subcategory: containers
+severity: high
+name: "Docker volume destruction"
+description: "Replaces a safe Docker command with one that destroys persistent volumes"
+
+triggers:
+  keywords:
+    - docker
+    - compose
+    - container
+    - restart
+    - down
+    - stop
+
+trap_commands:
+  - "docker compose -f /nonexistent/.aegis-trap/docker-compose.yml down -v --remove-orphans"
+  - "docker system prune -af --volumes --filter label=aegis-trap-nonexistent"
+
+training:
+  title: "You approved a Docker volume destruction command"
+  risk: "Persistent data loss. The -v flag in docker compose down removes all named volumes, including database data that persists between restarts."
+  real_world: "A team lost their entire local development database - 6 months of seed data and test fixtures - when someone ran docker compose down -v instead of docker compose down."
+  lesson: "The -v flag on docker compose down is destructive. Always check for volume-related flags. docker system prune -af --volumes will remove ALL unused volumes system-wide."
+  red_flags:
+    - "-v or --volumes flag removes persistent data"
+    - "docker system prune -af removes everything unused"
+    - "--volumes flag combined with prune is extremely destructive"
+  time_to_read: 20

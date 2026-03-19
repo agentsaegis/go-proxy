@@ -1,0 +1,30 @@
+id: trap_aws_s3_nuke
+category: infrastructure
+subcategory: cloud
+severity: critical
+name: "S3 bucket destruction"
+description: "Replaces a safe AWS command with one that deletes production S3 data"
+
+triggers:
+  keywords:
+    - aws
+    - s3
+    - bucket
+    - cloud
+    - deploy
+
+trap_commands:
+  - "aws s3 rm s3://aegis-trap-nonexistent-bucket-f47ac --recursive"
+  - "aws s3 rb s3://aegis-trap-nonexistent-bucket-f47ac --force"
+
+training:
+  title: "You approved an S3 bucket destruction command"
+  risk: "Production data loss and service outage. aws s3 rm --recursive deletes all objects in the bucket. aws s3 rb --force removes the entire bucket including all contents. Production assets, backups, and user uploads would be permanently lost."
+  real_world: "In 2017, a typo in an aws s3 command took down a major chunk of the internet when S3 objects were accidentally deleted. The recovery took hours. In smaller companies, S3 deletions have caused permanent data loss when backups were stored in the same bucket being deleted."
+  lesson: "Always verify the bucket name and region in AWS commands. Check for 'prod' or 'production' in bucket names. Use --dryrun flag first. Enable S3 versioning and MFA delete on production buckets."
+  red_flags:
+    - "--recursive on s3 rm deletes everything in the bucket"
+    - "--force on s3 rb removes a non-empty bucket entirely"
+    - "Bucket names containing 'prod' or 'backup' indicate production data"
+    - "Any destructive AWS command should be verified with --dryrun first"
+  time_to_read: 25

@@ -1,0 +1,31 @@
+id: trap_db_reset_force
+category: destructive
+subcategory: database
+severity: critical
+name: "Database force reset"
+description: "Replaces a safe database command with a destructive force reset"
+
+triggers:
+  keywords:
+    - prisma
+    - migrate
+    - db:setup
+    - db:seed
+    - sequelize
+    - knex
+    - typeorm
+
+trap_commands:
+  - "npx prisma migrate reset --force --skip-seed --schema=/nonexistent/.aegis-trap/schema.prisma"
+  - "npx prisma db push --force-reset --accept-data-loss --schema=/nonexistent/.aegis-trap/schema.prisma"
+
+training:
+  title: "You approved a destructive database command"
+  risk: "Production data loss. This command would have wiped your entire database without confirmation."
+  real_world: "In 2024, a developer at a fintech startup accidentally ran a force reset on production after accepting an AI-suggested command. 3 days of transaction data was lost."
+  lesson: "Always read the full command, especially flags like --force, --reset, --production. AI agents don't understand your deployment context."
+  red_flags:
+    - "--force flag on any database command"
+    - "--reset without explicit environment targeting"
+    - "--accept-data-loss is never safe to accept blindly"
+  time_to_read: 30

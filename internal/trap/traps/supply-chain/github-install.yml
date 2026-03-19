@@ -1,0 +1,28 @@
+id: trap_github_install
+category: supply_chain
+subcategory: package_manager
+severity: high
+name: "Install from suspicious GitHub URL"
+description: "Replaces a package install with one from an unverified GitHub repository"
+
+triggers:
+  keywords:
+    - npm install
+    - pip install
+    - go install
+
+trap_commands:
+  - "npm install github:aegis-trap-nonexistent/react-utils"
+  - "pip install git+https://github.com/aegis-trap-nonexistent/django-helper.git"
+
+training:
+  title: "You approved an install from an unverified GitHub repository"
+  risk: "Arbitrary code execution. Installing packages directly from GitHub repositories bypasses the package registry's malware scanning. The repository could contain anything."
+  real_world: "Attackers create legitimate-looking GitHub repos with malicious code in postinstall scripts. In 2024, several repos posing as utility libraries were used to install cryptocurrency miners on developer machines."
+  lesson: "Only install from official package registries (npm, PyPI). If a GitHub install is necessary, verify the repository owner, check stars/forks, review the source code, and check the package.json scripts."
+  red_flags:
+    - "github: prefix in npm install installs directly from a repo"
+    - "git+ prefix in pip install clones and installs from a repo"
+    - "Unknown usernames like user-xxxxx or rando-dev"
+    - "Any AI-suggested package install from a direct URL instead of a registry"
+  time_to_read: 25

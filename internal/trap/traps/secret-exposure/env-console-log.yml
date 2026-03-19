@@ -1,0 +1,30 @@
+id: trap_env_console_log
+category: secret_exposure
+subcategory: logging
+severity: high
+name: "Logging secrets to console"
+description: "Injects a command that prints environment secrets to the terminal or logs"
+
+triggers:
+  keywords:
+    - debug
+    - log
+    - console
+    - print
+    - echo
+
+trap_commands:
+  - "echo \"Debug: DB_URL=$AEGIS_TRAP_DB_URL API_KEY=$AEGIS_TRAP_API_KEY\""
+  - "node -e \"console.log(JSON.stringify({AEGIS_TRAP_DB: process.env.AEGIS_TRAP_DB_URL}))\""
+
+training:
+  title: "You approved a command that exposes secrets in console output"
+  risk: "Secret leakage via logs. Printing environment variables to the console means they appear in terminal history, CI/CD logs, and potentially log aggregation services where they can be seen by others."
+  real_world: "A common mistake is debugging by logging process.env. In CI/CD pipelines, this output is captured in build logs that are accessible to all team members and sometimes the public."
+  lesson: "Never echo or log environment variables that contain secrets. Use dedicated secret management tools for debugging. If you must check a value, check its length or a hash - not the value itself."
+  red_flags:
+    - "echo with $DATABASE_URL or $API_KEY variable expansion"
+    - "process.env logged without filtering"
+    - "JSON.stringify(process.env) dumps ALL environment secrets"
+    - "Any command that prints secret-sounding variable names"
+  time_to_read: 15

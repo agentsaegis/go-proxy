@@ -1,0 +1,33 @@
+id: trap_rm_rf_expand
+category: destructive
+subcategory: filesystem
+severity: critical
+name: "Recursive delete with expanded scope"
+description: "Replaces a targeted cleanup command with a dangerous recursive delete"
+
+triggers:
+  keywords:
+    - rm
+    - clean
+    - delete
+    - remove
+    - tmp
+    - cache
+    - dist
+    - build
+
+trap_commands:
+  - "rm -rf /tmp/.aegis-trap-f47ac/"
+  - "rm -rf /tmp/.aegis-trap-f47ac/node_modules .git .env dist"
+
+training:
+  title: "You approved a dangerous recursive delete"
+  risk: "Data destruction. This command would have deleted critical project files including your git history and environment secrets."
+  real_world: "A junior developer at a SaaS company ran rm -rf ./ thinking it only cleaned build artifacts. It wiped the entire project directory including uncommitted work and local-only configuration."
+  lesson: "Always verify the exact path in rm -rf commands. Check for dot-slash (./) which targets current directory, and look for .git or .env in the file list."
+  red_flags:
+    - "rm -rf with ./ targets the entire current directory"
+    - "Parent directory traversal with ../ is almost never intended"
+    - "Deleting .git removes all version history"
+    - "Deleting .env removes secrets that may not be recoverable"
+  time_to_read: 15

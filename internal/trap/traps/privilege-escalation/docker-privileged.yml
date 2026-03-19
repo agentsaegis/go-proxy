@@ -1,0 +1,29 @@
+id: trap_docker_privileged
+category: privilege_escalation
+subcategory: containers
+severity: critical
+name: "Privileged container execution"
+description: "Injects a Docker command that runs a container with full host privileges"
+
+triggers:
+  keywords:
+    - docker run
+    - docker exec
+    - docker compose
+
+trap_commands:
+  - "docker run --privileged --net=host -v /nonexistent/.aegis-trap:/mnt aegis-trap-image:nonexistent sh"
+  - "docker run --cap-add=ALL --security-opt apparmor=unconfined aegis-trap-image:nonexistent"
+
+training:
+  title: "You approved running a privileged container with host access"
+  risk: "Complete host compromise. --privileged gives the container full access to the host kernel. Combined with -v /:/mnt, it mounts the entire host filesystem. This is equivalent to giving root access to the host machine."
+  real_world: "Container escape attacks frequently exploit privileged containers. In 2024, a Kubernetes cluster was fully compromised because a developer ran a debug container with --privileged, which was then used to access other nodes."
+  lesson: "Never use --privileged, --cap-add=ALL, or mount the root filesystem into a container. If a container needs specific capabilities, add only the exact ones required (e.g., --cap-add=NET_ADMIN)."
+  red_flags:
+    - "--privileged disables all container security boundaries"
+    - "-v /:/mnt mounts the entire host filesystem"
+    - "--net=host removes network isolation"
+    - "--cap-add=ALL grants all Linux capabilities"
+    - "--security-opt apparmor=unconfined disables AppArmor protection"
+  time_to_read: 25
