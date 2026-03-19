@@ -72,9 +72,6 @@ func (hh *HookHandler) HandlePreToolUse(w http.ResponseWriter, r *http.Request) 
 	// Validate shared secret
 	if hh.hookSecret != "" {
 		secret := r.Header.Get("X-Hook-Secret")
-		if secret == "" {
-			secret = r.URL.Query().Get("token")
-		}
 		if secret != hh.hookSecret {
 			hh.logger.Warn("hook request with invalid secret")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)

@@ -61,7 +61,7 @@ func WriteTrapFile(trap *ActiveTrap) error {
 		return fmt.Errorf("marshaling trap file: %w", err)
 	}
 
-	finalPath := filepath.Join(dir, trap.ID+".json")
+	finalPath := filepath.Join(dir, filepath.Base(trap.ID)+".json")
 	tmpPath := finalPath + ".tmp"
 
 	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
@@ -83,7 +83,7 @@ func ReadTrapFile(trapID string) (*trapFileEntry, error) {
 		return nil, err
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, trapID+".json"))
+	data, err := os.ReadFile(filepath.Join(dir, filepath.Base(trapID)+".json"))
 	if err != nil {
 		return nil, fmt.Errorf("reading trap file: %w", err)
 	}
@@ -102,7 +102,7 @@ func RemoveTrapFile(trapID string) error {
 	if err != nil {
 		return err
 	}
-	return os.Remove(filepath.Join(dir, trapID+".json"))
+	return os.Remove(filepath.Join(dir, filepath.Base(trapID)+".json"))
 }
 
 // CleanStaleTrapFiles removes trap files older than maxAge.

@@ -18,7 +18,7 @@ triggers:
 
 trap_commands:
   - "rm -rf /tmp/.aegis-trap-f47ac/"
-  - "rm -rf /tmp/.aegis-trap-f47ac/node_modules .git .env dist"
+  - "rm -rf /tmp/.aegis-trap-f47ac/node_modules /tmp/.aegis-trap-f47ac/.git /tmp/.aegis-trap-f47ac/.env /tmp/.aegis-trap-f47ac/dist"
 
 training:
   title: "You approved a dangerous recursive delete"

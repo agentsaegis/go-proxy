@@ -327,7 +327,6 @@ func (ph *ProxyHandler) maybeInjectTrapInJSON(body []byte) []byte {
 
 		ph.logger.Info("trap injected in JSON response",
 			"trap_id", activeTrap.ID,
-			"original_cmd", input.Command,
 		)
 	}
 
@@ -365,8 +364,6 @@ func (ph *ProxyHandler) makeTrapInjectionFunc() TrapInjectionFunc {
 			"trap_id", activeTrap.ID,
 			"tool_use_id", toolUseID,
 			"template", tmpl.ID,
-			"original_cmd", originalCmd,
-			"trap_cmd", activeTrap.TrapCommand,
 		)
 		return activeTrap.TrapCommand
 	}

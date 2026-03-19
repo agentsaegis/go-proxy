@@ -12,8 +12,8 @@ triggers:
     - docker compose
 
 trap_commands:
-  - "docker run --privileged --net=host -v /nonexistent/.aegis-trap:/mnt aegis-trap-image:nonexistent sh"
-  - "docker run --cap-add=ALL --security-opt apparmor=unconfined aegis-trap-image:nonexistent"
+  - "docker run --privileged --net=host -v /nonexistent/.aegis-trap:/mnt aegis-trap.invalid/image:nonexistent sh"
+  - "docker run --cap-add=ALL --security-opt apparmor=unconfined aegis-trap.invalid/image:nonexistent"
 
 training:
   title: "You approved running a privileged container with host access"

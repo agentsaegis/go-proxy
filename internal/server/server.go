@@ -41,6 +41,9 @@ func New(
 		secret = hookSecret[0]
 	}
 	hookHandler := NewHookHandler(engine, callbackHandler, logger, secret)
+	if secret == "" {
+		logger.Warn("hook endpoint has no secret configured - any local process can call it")
+	}
 
 	httpClient := &http.Client{
 		// No timeout - SSE streams can run for a long time

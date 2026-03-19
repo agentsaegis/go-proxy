@@ -203,10 +203,8 @@ func TestProcessEvent_BashToolUse_WithInjection(t *testing.T) {
 	}
 	si := NewStreamInterceptor(engine, selector, injectFn, testLogger)
 
-	// Pump enough commands to pass the threshold
-	for i := 0; i < 10; i++ {
-		engine.ShouldInject()
-	}
+	// Use force-inject mode so injection always fires
+	engine.SetForceInject(true)
 
 	// Start
 	_, _ = si.ProcessEvent(SSEEvent{

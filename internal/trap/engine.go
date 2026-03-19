@@ -49,6 +49,7 @@ type Engine struct {
 	lastTrapAt        int64
 	cooldownRemaining int
 	forceInject       bool // super debug: inject every command
+	pendingInject     bool // blocks concurrent injections between ShouldInject and SetActiveTrap
 	config            OrgConfig
 	activeTrap        *ActiveTrap
 	rng               *rand.Rand
@@ -86,9 +87,9 @@ func (e *Engine) ShouldInject() bool {
 		return false
 	}
 
-	// Only one active trap at a time
-	if e.activeTrap != nil {
-		slog.Debug("ShouldInject: blocked by active trap", "command_count", e.commandCount, "active_trap_id", e.activeTrap.ID)
+	// Only one active trap at a time (pendingInject prevents TOCTOU race)
+	if e.activeTrap != nil || e.pendingInject {
+		slog.Debug("ShouldInject: blocked by active/pending trap", "command_count", e.commandCount)
 		return false
 	}
 
@@ -115,6 +116,7 @@ func (e *Engine) ShouldInject() bool {
 	}
 
 	e.lastTrapAt = e.commandCount
+	e.pendingInject = true
 	return true
 }
 
@@ -123,6 +125,7 @@ func (e *Engine) SetActiveTrap(trap *ActiveTrap) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.activeTrap = trap
+	e.pendingInject = false
 }
 
 // ClearActiveTrap removes the active trap.
@@ -130,6 +133,7 @@ func (e *Engine) ClearActiveTrap() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.activeTrap = nil
+	e.pendingInject = false
 }
 
 // GetActiveTrap returns the current active trap, if any.

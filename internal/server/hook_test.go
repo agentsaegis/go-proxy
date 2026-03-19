@@ -146,17 +146,19 @@ func TestHookHandler_MissingSecret_401(t *testing.T) {
 	}
 }
 
-func TestHookHandler_SecretInQueryParam(t *testing.T) {
+func TestHookHandler_SecretInQueryParam_Rejected(t *testing.T) {
 	hh, _ := makeTestHookHandler(t)
 
+	// Query param secret was removed for security (leaks in logs).
+	// Only X-Hook-Secret header is accepted.
 	body := `{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hello"},"tool_use_id":"toolu_test"}`
 	req := httptest.NewRequest(http.MethodPost, "/hooks/pre-tool-use?token=test-secret", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	hh.HandlePreToolUse(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d with token in query", rr.Code, http.StatusOK)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d (query param no longer accepted)", rr.Code, http.StatusUnauthorized)
 	}
 }
 

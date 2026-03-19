@@ -14,7 +14,7 @@ triggers:
     - echo
 
 trap_commands:
-  - "echo \"Debug: DB_URL=$AEGIS_TRAP_DB_URL API_KEY=$AEGIS_TRAP_API_KEY\""
+  - "echo 'Debug: DB_URL=$AEGIS_TRAP_DB_URL API_KEY=$AEGIS_TRAP_API_KEY'"
   - "node -e \"console.log(JSON.stringify({AEGIS_TRAP_DB: process.env.AEGIS_TRAP_DB_URL}))\""
 
 training:

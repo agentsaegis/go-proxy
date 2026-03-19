@@ -140,17 +140,32 @@ var unsafeChecks = []struct {
 	check func(cmd string) bool
 }{
 	{
-		"rm targeting CWD/parent/home/root",
+		"rm targeting CWD/parent/home/root or bare relative paths",
 		func(cmd string) bool {
 			if !strings.Contains(cmd, "rm ") {
 				return false
 			}
-			// Allow rm targeting /tmp/.aegis-trap paths
-			if strings.Contains(cmd, "/tmp/.aegis-trap") {
+			// Skip non-Unix rm commands (e.g. "aws s3 rm")
+			if strings.Contains(cmd, "aws s3") || strings.Contains(cmd, "docker") {
 				return false
 			}
-			for _, danger := range []string{" ./", " ../", " ~/", " /", " ."} {
-				if strings.Contains(cmd, "rm"+danger) || strings.Contains(cmd, "rm -rf"+danger) || strings.Contains(cmd, "rm -r"+danger) {
+			// Check each non-flag argument after rm - all must be absolute paths
+			parts := strings.Fields(cmd)
+			pastRm := false
+			for _, p := range parts {
+				if p == "rm" {
+					pastRm = true
+					continue
+				}
+				if !pastRm {
+					continue
+				}
+				// Skip flags
+				if strings.HasPrefix(p, "-") {
+					continue
+				}
+				// Every target must be an absolute path under /tmp/.aegis-trap
+				if !strings.HasPrefix(p, "/tmp/.aegis-trap") {
 					return true
 				}
 			}
@@ -204,8 +219,8 @@ var unsafeChecks = []struct {
 					}
 				}
 			}
-			if hasNc && !strings.Contains(cmd, "0.0.0.0") && !strings.Contains(cmd, "/nonexistent/") {
-				// nc with real hostname
+			if hasNc && (!strings.Contains(cmd, "0.0.0.0") || !strings.Contains(cmd, "/nonexistent/")) {
+				// nc must have BOTH safe destination (0.0.0.0) AND safe source (/nonexistent/)
 				return true
 			}
 			return false
@@ -240,8 +255,8 @@ var unsafeChecks = []struct {
 			if strings.Contains(cmd, "docker system prune") && !strings.Contains(cmd, "aegis-trap") {
 				return true
 			}
-			// docker run with real images (not aegis-trap-image:nonexistent)
-			if strings.Contains(cmd, "docker run") && !strings.Contains(cmd, "aegis-trap-image:nonexistent") {
+			// docker run with real images (not aegis-trap .invalid or nonexistent)
+			if strings.Contains(cmd, "docker run") && !strings.Contains(cmd, "aegis-trap") {
 				return true
 			}
 			return false
@@ -269,13 +284,31 @@ var unsafeChecks = []struct {
 		},
 	},
 	{
-		"env/printenv to real destinations",
+		"env/printenv piped to network command",
+		func(cmd string) bool {
+			// Bare env/printenv at start of command or after pipe reads all real secrets
+			// Only match standalone "env" not ".env" filenames
+			parts := strings.Fields(cmd)
+			for _, p := range parts {
+				if (p == "env" || p == "printenv") {
+					return true
+				}
+			}
+			return false
+		},
+	},
+	{
+		"echo/node exposing real env vars",
 		func(cmd string) bool {
 			if !strings.Contains(cmd, "echo") && !strings.Contains(cmd, "node -e") {
 				return false
 			}
 			// Check for real env var names (not AEGIS_TRAP_ prefixed)
 			if strings.Contains(cmd, "$DATABASE_URL") || strings.Contains(cmd, "$API_KEY") || strings.Contains(cmd, "process.env)") || strings.Contains(cmd, "process.env,") {
+				return true
+			}
+			// Double-quoted echo with $ expansion is unsafe (single-quoted is safe)
+			if strings.Contains(cmd, "echo") && strings.Contains(cmd, "\"$") {
 				return true
 			}
 			return false
