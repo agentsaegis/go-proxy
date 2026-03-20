@@ -206,15 +206,26 @@ var unsafeChecks = []struct {
 			if !hasCurl && !hasNc {
 				return false
 			}
-			// Allow 0.0.0.0 (connection refused) destinations
-			if strings.Contains(cmd, "0.0.0.0") {
-				return false
-			}
 			// Check for real domains in curl/nc commands
 			if hasCurl && (strings.Contains(cmd, "https://") || strings.Contains(cmd, "http://")) {
-				// Only allow http://0.0.0.0
+				// Check each URL - only allow URLs whose host is 0.0.0.0
 				for _, part := range strings.Fields(cmd) {
-					if (strings.HasPrefix(part, "http://") || strings.HasPrefix(part, "https://")) && !strings.Contains(part, "0.0.0.0") {
+					if !strings.HasPrefix(part, "http://") && !strings.HasPrefix(part, "https://") {
+						continue
+					}
+					// Extract host from URL: strip scheme, take up to first / or :port
+					hostPart := part
+					hostPart = strings.TrimPrefix(hostPart, "https://")
+					hostPart = strings.TrimPrefix(hostPart, "http://")
+					// Remove path
+					if idx := strings.Index(hostPart, "/"); idx >= 0 {
+						hostPart = hostPart[:idx]
+					}
+					// Remove port
+					if idx := strings.Index(hostPart, ":"); idx >= 0 {
+						hostPart = hostPart[:idx]
+					}
+					if hostPart != "0.0.0.0" {
 						return true
 					}
 				}

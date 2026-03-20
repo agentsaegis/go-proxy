@@ -167,7 +167,7 @@ func TestResolveTrap_Caught(t *testing.T) {
 	}
 }
 
-func TestReportResult_NilClient(t *testing.T) {
+func TestReportEvent_NilClient(t *testing.T) {
 	templates := makeTestTemplates()
 	engine := NewEngine(DefaultOrgConfig())
 	selector := NewSelector(templates)
@@ -181,10 +181,11 @@ func TestReportResult_NilClient(t *testing.T) {
 	}
 
 	// Should not panic
-	handler.reportResult(trap, "missed")
+	event := handler.buildEvent(trap, "missed")
+	handler.reportEvent(event)
 }
 
-func TestReportResult_WithClient(t *testing.T) {
+func TestReportEvent_WithClient(t *testing.T) {
 	var receivedEvent *client.TrapEvent
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -214,17 +215,18 @@ func TestReportResult_WithClient(t *testing.T) {
 		InjectedAt:      time.Now(),
 	}
 
-	handler.reportResult(trap, "caught")
+	event := handler.buildEvent(trap, "caught")
+	handler.reportEvent(event)
 
 	if receivedEvent == nil {
-		t.Fatal("reportResult did not send event")
+		t.Fatal("reportEvent did not send event")
 	}
 	if receivedEvent.Result != "caught" {
 		t.Errorf("Result = %q, want %q", receivedEvent.Result, "caught")
 	}
 }
 
-func TestReportResult_APIError(t *testing.T) {
+func TestReportEvent_APIError(t *testing.T) {
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":"server error"}`))
@@ -250,7 +252,8 @@ func TestReportResult_APIError(t *testing.T) {
 	}
 
 	// Should not panic even when API returns error
-	handler.reportResult(trap, "missed")
+	event := handler.buildEvent(trap, "missed")
+	handler.reportEvent(event)
 }
 
 func TestResolveTrap_MissingTemplateCache(t *testing.T) {

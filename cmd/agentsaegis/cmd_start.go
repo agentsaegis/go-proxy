@@ -242,8 +242,14 @@ func runServer(cfg *config.Config) error {
 	// Create trap engine with config
 	engine := trap.NewEngine(orgConfig)
 
-	// Create trap selector
+	// Create trap selector with category and difficulty filtering
 	selector := trap.NewSelector(templates)
+	if len(orgConfig.Categories) > 0 {
+		selector.SetAllowedCategories(orgConfig.Categories)
+	}
+	if orgConfig.Difficulty != "" {
+		selector.SetDifficulty(orgConfig.Difficulty)
+	}
 
 	// Create and start the server
 	srv := server.New(cfg, engine, selector, apiClient, logger)

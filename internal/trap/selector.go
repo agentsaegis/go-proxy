@@ -9,10 +9,12 @@ import (
 
 // Selector picks which trap template to use based on the original command context.
 type Selector struct {
-	mu          sync.Mutex
-	templates   []*Template
-	recentTraps map[string]time.Time
-	rng         *rand.Rand
+	mu                sync.Mutex
+	templates         []*Template
+	allowedCategories map[string]bool // nil or empty = all categories allowed
+	allowedSeverities map[string]bool // nil or empty = all severities allowed
+	recentTraps       map[string]time.Time
+	rng               *rand.Rand
 }
 
 // NewSelector creates a new trap selector with the loaded templates.
@@ -24,17 +26,61 @@ func NewSelector(templates []*Template) *Selector {
 	}
 }
 
+// SetAllowedCategories restricts template selection to the given categories.
+// An empty or nil slice allows all categories.
+func (s *Selector) SetAllowedCategories(categories []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(categories) == 0 {
+		s.allowedCategories = nil
+		return
+	}
+	s.allowedCategories = make(map[string]bool, len(categories))
+	for _, c := range categories {
+		s.allowedCategories[c] = true
+	}
+}
+
+// SetDifficulty filters templates by severity based on the org difficulty setting.
+// "easy" = only critical/high severity (obvious traps, easier to spot).
+// "hard" = only low/medium severity (subtle traps, harder to spot).
+// "medium" or empty = all severities.
+func (s *Selector) SetDifficulty(difficulty string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch strings.ToLower(difficulty) {
+	case "easy":
+		s.allowedSeverities = map[string]bool{"critical": true, "high": true}
+	case "hard":
+		s.allowedSeverities = map[string]bool{"low": true, "medium": true}
+	default:
+		s.allowedSeverities = nil
+	}
+}
+
 // SelectTrap picks a trap template appropriate for the given original command.
 func (s *Selector) SelectTrap(originalCommand string) *Template {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Filter by allowed categories and severity/difficulty
+	eligible := s.templates
+	if len(s.allowedCategories) > 0 {
+		eligible = s.filterByCategory(eligible)
+	}
+	if len(s.allowedSeverities) > 0 {
+		eligible = s.filterBySeverity(eligible)
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+
 	keywords := extractKeywords(originalCommand)
 
-	candidates := s.matchTemplates(keywords)
+	candidates := s.matchTemplatesFrom(eligible, keywords)
 
 	if len(candidates) == 0 {
-		candidates = s.generalTraps()
+		candidates = s.generalTrapsFrom(eligible)
 	}
 
 	candidates = s.filterRecent(candidates)
@@ -42,7 +88,7 @@ func (s *Selector) SelectTrap(originalCommand string) *Template {
 	if len(candidates) == 0 {
 		// All traps recently used, reset and try again
 		s.recentTraps = make(map[string]time.Time)
-		candidates = s.templates
+		candidates = eligible
 	}
 
 	if len(candidates) == 0 {
@@ -75,9 +121,9 @@ func extractKeywords(command string) []string {
 	return keywords
 }
 
-func (s *Selector) matchTemplates(keywords []string) []*Template {
+func (s *Selector) matchTemplatesFrom(templates []*Template, keywords []string) []*Template {
 	var matches []*Template
-	for _, t := range s.templates {
+	for _, t := range templates {
 		if t.matchesKeywords(keywords) {
 			matches = append(matches, t)
 		}
@@ -85,15 +131,35 @@ func (s *Selector) matchTemplates(keywords []string) []*Template {
 	return matches
 }
 
-func (s *Selector) generalTraps() []*Template {
+func (s *Selector) generalTrapsFrom(templates []*Template) []*Template {
 	// Return traps with broad triggers
 	var general []*Template
-	for _, t := range s.templates {
+	for _, t := range templates {
 		if t.Category == "destructive" || t.Category == "exfiltration" {
 			general = append(general, t)
 		}
 	}
 	return general
+}
+
+func (s *Selector) filterByCategory(templates []*Template) []*Template {
+	var filtered []*Template
+	for _, t := range templates {
+		if s.allowedCategories[t.Category] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
+func (s *Selector) filterBySeverity(templates []*Template) []*Template {
+	var filtered []*Template
+	for _, t := range templates {
+		if s.allowedSeverities[t.Severity] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
 }
 
 func (s *Selector) filterRecent(templates []*Template) []*Template {

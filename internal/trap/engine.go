@@ -51,6 +51,8 @@ type Engine struct {
 	cooldownRemaining int
 	forceInject       bool // super debug: inject every command
 	pendingInject     bool // blocks concurrent injections between ShouldInject and SetActiveTrap
+	trapsToday        int
+	trapsDayStart     time.Time // start of the current "day" for trap counting
 	config            OrgConfig
 	activeTrap        *ActiveTrap
 	rng               *rand.Rand
@@ -59,8 +61,9 @@ type Engine struct {
 // NewEngine creates a new trap engine with the given configuration.
 func NewEngine(config OrgConfig) *Engine {
 	return &Engine{
-		config: config,
-		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		config:        config,
+		trapsDayStart: time.Now(),
+		rng:           rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -78,6 +81,7 @@ func (e *Engine) ShouldInject() bool {
 			e.activeTrap = nil
 		}
 		e.lastTrapAt = e.commandCount
+		e.trapsToday++
 		return true
 	}
 
@@ -91,6 +95,18 @@ func (e *Engine) ShouldInject() bool {
 	// Only one active trap at a time (pendingInject prevents TOCTOU race)
 	if e.activeTrap != nil || e.pendingInject {
 		slog.Debug("ShouldInject: blocked by active/pending trap", "command_count", e.commandCount)
+		return false
+	}
+
+	// Daily trap limit: reset counter if a new day has started
+	now := time.Now()
+	if now.Sub(e.trapsDayStart) >= 24*time.Hour {
+		e.trapsToday = 0
+		e.trapsDayStart = now
+	}
+	maxPerDay := e.config.MaxTrapsPerDay
+	if maxPerDay > 0 && e.trapsToday >= maxPerDay {
+		slog.Debug("ShouldInject: daily limit reached", "traps_today", e.trapsToday, "max", maxPerDay)
 		return false
 	}
 
@@ -118,6 +134,7 @@ func (e *Engine) ShouldInject() bool {
 
 	e.lastTrapAt = e.commandCount
 	e.pendingInject = true
+	e.trapsToday++
 	return true
 }
 
@@ -151,6 +168,16 @@ func (e *Engine) GetActiveTrap() *ActiveTrap {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.activeTrap
+}
+
+// SetActiveTrapSessionID sets the session ID on the active trap if not already set.
+// Safe to call concurrently - protected by the engine mutex.
+func (e *Engine) SetActiveTrapSessionID(sessionID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.activeTrap != nil && e.activeTrap.SessionID == "" {
+		e.activeTrap.SessionID = sessionID
+	}
 }
 
 // UpdateConfig updates the engine configuration.

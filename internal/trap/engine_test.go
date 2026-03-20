@@ -3,6 +3,7 @@ package trap
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestDefaultOrgConfig(t *testing.T) {
@@ -271,6 +272,50 @@ func TestPendingInjectClearedOnFailedSelection(t *testing.T) {
 	// Next ShouldInject should work again
 	if !engine.ShouldInject() {
 		t.Error("ShouldInject() = false after ClearPendingInject, want true")
+	}
+}
+
+func TestEngine_MaxTrapsPerDay(t *testing.T) {
+	cfg := OrgConfig{TrapFrequency: 1, MaxTrapsPerDay: 3}
+	engine := NewEngine(cfg)
+
+	injected := 0
+	for i := 0; i < 1000; i++ {
+		if engine.ShouldInject() {
+			injected++
+			// Clear pending so next ShouldInject isn't blocked
+			engine.ClearPendingInject()
+		}
+	}
+
+	if injected != 3 {
+		t.Errorf("injected %d traps, want exactly 3 (MaxTrapsPerDay)", injected)
+	}
+}
+
+func TestEngine_MaxTrapsPerDay_ResetAfterDay(t *testing.T) {
+	cfg := OrgConfig{TrapFrequency: 1, MaxTrapsPerDay: 1}
+	engine := NewEngine(cfg)
+
+	// Use up the daily limit
+	if !engine.ShouldInject() {
+		t.Fatal("first ShouldInject should return true")
+	}
+	engine.ClearPendingInject()
+
+	// Should be blocked now
+	if engine.ShouldInject() {
+		t.Error("ShouldInject should return false after daily limit reached")
+	}
+
+	// Simulate day passing by backdating trapsDayStart
+	engine.mu.Lock()
+	engine.trapsDayStart = time.Now().Add(-25 * time.Hour)
+	engine.mu.Unlock()
+
+	// Should work again after day reset
+	if !engine.ShouldInject() {
+		t.Error("ShouldInject should return true after day reset")
 	}
 }
 

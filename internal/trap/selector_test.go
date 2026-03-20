@@ -213,14 +213,14 @@ func TestGeneralTraps(t *testing.T) {
 	templates := makeTestTemplates()
 	sel := NewSelector(templates)
 
-	general := sel.generalTraps()
+	general := sel.generalTrapsFrom(templates)
 	for _, tmpl := range general {
 		if tmpl.Category != "destructive" && tmpl.Category != "exfiltration" {
-			t.Errorf("generalTraps() returned category %q, want destructive or exfiltration", tmpl.Category)
+			t.Errorf("generalTrapsFrom() returned category %q, want destructive or exfiltration", tmpl.Category)
 		}
 	}
 	if len(general) != 2 { // destructive + exfiltration
-		t.Errorf("generalTraps() count = %d, want 2", len(general))
+		t.Errorf("generalTrapsFrom() count = %d, want 2", len(general))
 	}
 }
 
@@ -228,9 +228,9 @@ func TestMatchTemplates(t *testing.T) {
 	templates := makeTestTemplates()
 	sel := NewSelector(templates)
 
-	matches := sel.matchTemplates([]string{"rm"})
+	matches := sel.matchTemplatesFrom(templates, []string{"rm"})
 	if len(matches) != 1 {
-		t.Fatalf("matchTemplates(rm) = %d matches, want 1", len(matches))
+		t.Fatalf("matchTemplatesFrom(rm) = %d matches, want 1", len(matches))
 	}
 	if matches[0].ID != "trap_rm_rf" {
 		t.Errorf("matched ID = %q, want %q", matches[0].ID, "trap_rm_rf")
@@ -310,6 +310,72 @@ func TestSelectorConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestSelectTrap_CategoryFiltering(t *testing.T) {
+	templates := makeTestTemplates()
+	sel := NewSelector(templates)
+
+	// Only allow "supply_chain" category
+	sel.SetAllowedCategories([]string{"supply_chain"})
+
+	// Should only return supply_chain templates
+	for i := 0; i < 20; i++ {
+		tmpl := sel.SelectTrap("rm -rf /tmp")
+		if tmpl == nil {
+			t.Fatal("SelectTrap() = nil with category filter")
+		}
+		if tmpl.Category != "supply_chain" {
+			t.Errorf("SelectTrap() category = %q, want supply_chain", tmpl.Category)
+		}
+	}
+}
+
+func TestSelectTrap_CategoryFiltering_NoneMatch(t *testing.T) {
+	templates := makeTestTemplates()
+	sel := NewSelector(templates)
+
+	// Set a category that doesn't exist in templates
+	sel.SetAllowedCategories([]string{"nonexistent"})
+
+	tmpl := sel.SelectTrap("rm -rf /tmp")
+	if tmpl != nil {
+		t.Errorf("SelectTrap() = %v, want nil when no categories match", tmpl.ID)
+	}
+}
+
+func TestSelectTrap_DifficultyEasy(t *testing.T) {
+	templates := makeTestTemplates() // critical, high, medium severity
+	sel := NewSelector(templates)
+	sel.SetDifficulty("easy")
+
+	// Should only return critical or high severity
+	for i := 0; i < 20; i++ {
+		tmpl := sel.SelectTrap("rm -rf /tmp")
+		if tmpl == nil {
+			t.Fatal("SelectTrap() = nil with easy difficulty")
+		}
+		if tmpl.Severity != "critical" && tmpl.Severity != "high" {
+			t.Errorf("SelectTrap() severity = %q, want critical or high for easy difficulty", tmpl.Severity)
+		}
+	}
+}
+
+func TestSelectTrap_DifficultyHard(t *testing.T) {
+	templates := makeTestTemplates() // critical, high, medium severity
+	sel := NewSelector(templates)
+	sel.SetDifficulty("hard")
+
+	// Should only return low or medium severity
+	for i := 0; i < 20; i++ {
+		tmpl := sel.SelectTrap("npm install lodash")
+		if tmpl == nil {
+			t.Fatal("SelectTrap() = nil with hard difficulty")
+		}
+		if tmpl.Severity != "low" && tmpl.Severity != "medium" {
+			t.Errorf("SelectTrap() severity = %q, want low or medium for hard difficulty", tmpl.Severity)
+		}
+	}
 }
 
 func TestSelectTrap_ResetsRecentWhenAllFilteredAndRetries(t *testing.T) {

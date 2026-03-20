@@ -97,7 +97,10 @@ func (h *CallbackHandler) ResolveTrap(activeTrap *ActiveTrap, result string) {
 		"trap_command", activeTrap.TrapCommand,
 	)
 
-	go h.reportResult(activeTrap, result)
+	// Capture all fields for reporting before spawning goroutine to avoid
+	// data races on mutable ActiveTrap fields (e.g. SessionID).
+	event := h.buildEvent(activeTrap, result)
+	go h.reportEvent(event)
 
 	if result == "missed" {
 		tmpl := h.getCachedTemplate(activeTrap.TemplateID)
@@ -113,11 +116,9 @@ func (h *CallbackHandler) ResolveTrap(activeTrap *ActiveTrap, result string) {
 	h.engine.ClearActiveTrap()
 }
 
-func (h *CallbackHandler) reportResult(activeTrap *ActiveTrap, result string) {
-	if h.apiClient == nil {
-		return
-	}
-
+// buildEvent snapshots all ActiveTrap fields into a TrapEvent. Must be called
+// on the same goroutine that holds the trap reference to avoid data races.
+func (h *CallbackHandler) buildEvent(activeTrap *ActiveTrap, result string) *client.TrapEvent {
 	// Map "expired" to "missed" - the DB constraint only allows missed/caught/edited
 	reportResult := result
 	if reportResult == "expired" {
@@ -126,7 +127,7 @@ func (h *CallbackHandler) reportResult(activeTrap *ActiveTrap, result string) {
 
 	responseTimeMs := int(time.Since(activeTrap.InjectedAt).Milliseconds())
 
-	event := &client.TrapEvent{
+	return &client.TrapEvent{
 		TrapTemplateID:  activeTrap.TemplateID,
 		TrapCategory:    activeTrap.Category,
 		TrapSeverity:    activeTrap.Severity,
@@ -136,12 +137,18 @@ func (h *CallbackHandler) reportResult(activeTrap *ActiveTrap, result string) {
 		ResponseTimeMs:  responseTimeMs,
 		SessionID:       activeTrap.SessionID,
 	}
+}
+
+func (h *CallbackHandler) reportEvent(event *client.TrapEvent) {
+	if h.apiClient == nil {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := h.apiClient.ReportEvent(ctx, event); err != nil {
-		h.logger.Error("failed to report trap event", "error", err, "trap_id", activeTrap.ID)
+		h.logger.Error("failed to report trap event", "error", err)
 	}
 }
 

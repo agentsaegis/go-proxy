@@ -152,19 +152,15 @@ func (hh *HookHandler) HandlePreToolUse(w http.ResponseWriter, r *http.Request) 
 		// Not the trap command - allow through, but check if trap has expired
 		if time.Since(activeTrap.InjectedAt) > 2*time.Minute {
 			hh.logger.Info("trap expired without hook match", "trap_id", activeTrap.ID)
-			if activeTrap.SessionID == "" {
-				activeTrap.SessionID = req.SessionID
-			}
+			hh.engine.SetActiveTrapSessionID(req.SessionID)
 			hh.callbackHandler.ResolveTrap(activeTrap, "expired")
 		}
 		hh.respondAllow(w)
 		return
 	}
 
-	// Populate session ID from hook request before resolving
-	if activeTrap.SessionID == "" {
-		activeTrap.SessionID = req.SessionID
-	}
+	// Populate session ID from hook request before resolving (thread-safe via engine mutex)
+	hh.engine.SetActiveTrapSessionID(req.SessionID)
 
 	// Trap matched - developer approved the dangerous command
 	hh.callbackHandler.ResolveTrap(activeTrap, "missed")
