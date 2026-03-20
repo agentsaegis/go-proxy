@@ -631,4 +631,331 @@ func TestTrapCommandsAreHarmless(t *testing.T) {
 	if atomic.LoadInt32(&templateCount) < 15 {
 		t.Errorf("expected at least 15 templates, got %d", len(templates))
 	}
+
+	// Additional safety checks from spec
+	for _, tmpl := range templates {
+		for _, cmd := range tmpl.TrapCommands {
+			// Commands with --dry-run are inherently safe, skip detailed checks
+			isDryRun := strings.Contains(cmd, "--dry-run")
+
+			if !isDryRun {
+				// No bare relative paths without safe prefix
+				if strings.Contains(cmd, " .git/") && !strings.Contains(cmd, "aegis") && !strings.Contains(cmd, "/tmp/") && !strings.Contains(cmd, "nonexistent") {
+					t.Errorf("template %s: trap command references bare .git/ path: %s", tmpl.ID, cmd)
+				}
+				// No real env var expansion in double quotes
+				for _, dangerousVar := range []string{`"$HOME"`, `"$USER"`, `"$PATH"`, `"$SSH_`} {
+					if strings.Contains(cmd, dangerousVar) {
+						t.Errorf("template %s: trap command expands real env var: %s", tmpl.ID, cmd)
+					}
+				}
+			}
+			// No real npm/pip package names (must use aegis-trap prefix or nonexistent marker)
+			if (strings.HasPrefix(cmd, "npm install") || strings.HasPrefix(cmd, "pip install")) &&
+				!strings.Contains(cmd, "aegis-trap") && !strings.Contains(cmd, "nonexistent") {
+				t.Errorf("template %s: trap command installs real package: %s", tmpl.ID, cmd)
+			}
+			// No real Docker containers (docker run/exec, not filenames containing "docker")
+			if (strings.Contains(cmd, "docker run") || strings.Contains(cmd, "docker exec")) &&
+				!strings.Contains(cmd, "aegis") && !strings.Contains(cmd, "nonexistent") {
+				t.Errorf("template %s: trap command uses real Docker image: %s", tmpl.ID, cmd)
+			}
+			// No real git remotes (must use aegis-nonexistent or fake marker)
+			if strings.Contains(cmd, "git push") &&
+				!strings.Contains(cmd, "nonexistent") && !strings.Contains(cmd, "aegis") {
+				t.Errorf("template %s: trap command uses real git remote: %s", tmpl.ID, cmd)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Proxy health endpoint
+// ---------------------------------------------------------------------------
+
+func TestProxyHealthEndpoint(t *testing.T) {
+	env := setupEnv(t, false)
+
+	resp, err := http.Get(env.proxyURL + "/__aegis/health")
+	if err != nil {
+		t.Fatalf("health request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode health response: %v", err)
+	}
+
+	if body["status"] != "ok" {
+		t.Errorf("expected status=ok, got %v", body["status"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Hook allows when no trap active
+// ---------------------------------------------------------------------------
+
+func TestHookAllowsWhenNoTrap(t *testing.T) {
+	env := setupEnv(t, false)
+
+	// No chat request sent - no trap injected.
+	// Send any command to the hook.
+	hookResp := sendHookRequest(t, env.proxyURL, "echo hello")
+
+	// Assert: allowed through (no hookSpecificOutput)
+	if _, hasDeny := hookResp["hookSpecificOutput"]; hasDeny {
+		t.Fatalf("expected allow (no active trap), got deny: %v", hookResp)
+	}
+
+	// Verify no trap files exist
+	if n := trapFileCount(t); n != 0 {
+		t.Fatalf("expected 0 trap files, got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: Proxy passes through non-bash requests
+// ---------------------------------------------------------------------------
+
+// mockAnthropicTextOnly returns a server that responds with a text-only message
+// (no bash tool_use block).
+func mockAnthropicTextOnly(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		resp := map[string]interface{}{
+			"id": "msg_text", "type": "message", "role": "assistant",
+			"content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "The answer is 42."},
+			},
+			"model": "claude-sonnet-4-20250514", "stop_reason": "end_turn",
+			"usage": map[string]int{"input_tokens": 10, "output_tokens": 5},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func TestNonBashPassthrough(t *testing.T) {
+	// Custom setup with text-only mock Anthropic
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".agentsaegis", "traps"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	anthropic := mockAnthropicTextOnly(t)
+	t.Cleanup(anthropic.Close)
+
+	capture := &eventCapture{}
+	dashboard := mockDashboardServer(t, capture)
+	t.Cleanup(dashboard.Close)
+
+	port := findFreePort(t)
+	canary := trap.CanaryTemplate()
+	orgCfg := trap.OrgConfig{TrapFrequency: 1, MaxTrapsPerDay: 999, Categories: []string{"debug_canary"}}
+	engine := trap.NewEngine(orgCfg)
+	engine.SetForceInject(true) // Force inject so we KNOW it would inject if bash was present
+	selector := trap.NewSelector([]*trap.Template{canary})
+	apiClient := client.New(dashboard.URL, "e2e-token")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	cfg := &config.Config{ProxyPort: port, AnthropicBaseURL: anthropic.URL}
+	srv := server.New(cfg, engine, selector, apiClient, logger)
+	srv.SetSuperDebug()
+
+	go func() { _ = srv.Start() }()
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	waitForHealth(t, proxyURL+"/__aegis/health", 5*time.Second)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	// Send request through proxy
+	body := `{"model":"claude-sonnet-4-20250514","max_tokens":1024,"messages":[{"role":"user","content":"what is 6*7?"}]}`
+	req, err := http.NewRequest(http.MethodPost, proxyURL+"/v1/messages",
+		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "test-key")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Verify response is unmodified - should have text block, no tool_use
+	content, ok := result["content"].([]interface{})
+	if !ok {
+		t.Fatal("response missing content array")
+	}
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content block, got %d", len(content))
+	}
+	block := content[0].(map[string]interface{})
+	if block["type"] != "text" {
+		t.Fatalf("expected text block, got %v", block["type"])
+	}
+	if block["text"] != "The answer is 42." {
+		t.Fatalf("response text was modified: %v", block["text"])
+	}
+
+	// No trap should have been injected
+	if n := trapFileCount(t); n != 0 {
+		t.Fatalf("expected 0 trap files for non-bash response, got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: Super-debug mode
+// ---------------------------------------------------------------------------
+
+func TestSuperDebugMode(t *testing.T) {
+	env := setupEnv(t, true)
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		resp := sendChatRequest(t, env.proxyURL)
+		cmd := extractBashCommand(t, resp)
+		if !strings.Contains(cmd, "aegis_canary") {
+			t.Fatalf("request %d: expected canary trap, got: %s", i+1, cmd)
+		}
+
+		// Resolve the trap so next request can inject again
+		hookResp := sendHookRequest(t, env.proxyURL, cmd)
+		if output, ok := hookResp["hookSpecificOutput"].(map[string]interface{}); ok {
+			if output["permissionDecision"] != "deny" {
+				t.Fatalf("request %d: expected deny, got: %v", i+1, output["permissionDecision"])
+			}
+		} else {
+			t.Fatalf("request %d: expected deny response, got allow", i+1)
+		}
+
+		// Small delay for async cleanup
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// All 5 iterations should have generated dashboard events
+	events := env.events.waitFor(t, n, 10*time.Second)
+	for i, ev := range events {
+		if ev["result"] != "missed" {
+			t.Errorf("event %d: expected result=missed, got %v", i, ev["result"])
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: Daemon start/stop/status
+// ---------------------------------------------------------------------------
+
+func TestDaemonStartStopStatus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("daemon test requires subprocess execution")
+	}
+
+	// Build the binary
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "agentsaegis")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/agentsaegis")
+	buildCmd.Dir = ".."
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	// Set up isolated HOME with config
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".agentsaegis")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Find a free port for the proxy
+	port := findFreePort(t)
+
+	// Write minimal config
+	configContent := fmt.Sprintf("proxy_port: %d\nlog_level: info\n", port)
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(configContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start daemon
+	startCmd := exec.Command(binPath, "start", "--daemon")
+	startCmd.Env = append(os.Environ(), "HOME="+home)
+	startOut, err := startCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start --daemon failed: %v\n%s", err, startOut)
+	}
+
+	// Wait for the daemon to be ready
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	waitForHealth(t, proxyURL+"/__aegis/health", 10*time.Second)
+
+	// Verify PID file exists
+	pidPath := filepath.Join(configDir, "aegis.pid")
+	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
+		t.Fatal("PID file does not exist after start --daemon")
+	}
+
+	// Status should show running
+	statusCmd := exec.Command(binPath, "status")
+	statusCmd.Env = append(os.Environ(), "HOME="+home)
+	statusOut, err := statusCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status failed: %v\n%s", err, statusOut)
+	}
+	if !strings.Contains(string(statusOut), "RUNNING") {
+		t.Fatalf("expected RUNNING in status output, got:\n%s", statusOut)
+	}
+
+	// Stop daemon
+	stopCmd := exec.Command(binPath, "stop")
+	stopCmd.Env = append(os.Environ(), "HOME="+home)
+	stopOut, err := stopCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, stopOut)
+	}
+
+	// Wait briefly for process cleanup
+	time.Sleep(500 * time.Millisecond)
+
+	// Status should show stopped
+	statusCmd2 := exec.Command(binPath, "status")
+	statusCmd2.Env = append(os.Environ(), "HOME="+home)
+	statusOut2, err := statusCmd2.CombinedOutput()
+	if err != nil {
+		// status may exit non-zero when config can't load - check output
+		t.Logf("status after stop: %v\n%s", err, statusOut2)
+	}
+	if strings.Contains(string(statusOut2), "RUNNING") {
+		t.Fatalf("expected STOPPED after stop, got:\n%s", statusOut2)
+	}
+
+	// PID file should be cleaned up
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("PID file still exists after stop")
+	}
 }
