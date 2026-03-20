@@ -9,7 +9,26 @@ permissions:
   contents: write
 
 jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Lint
+        run: go vet ./...
+
+      - name: Unit tests
+        run: make test
+
+      - name: E2E tests
+        run: make test-e2e
+
   goreleaser:
+    needs: [ci]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
