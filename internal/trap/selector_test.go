@@ -1,6 +1,7 @@
 package trap
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -289,6 +290,26 @@ func TestSelectTrap_SingleTemplate_AlwaysReturns(t *testing.T) {
 		}
 		sel.MarkUsed(tmpl.ID)
 	}
+}
+
+func TestSelectorConcurrentAccess(t *testing.T) {
+	templates := makeTestTemplates()
+	sel := NewSelector(templates)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				tmpl := sel.SelectTrap("rm -rf /tmp")
+				if tmpl != nil {
+					sel.MarkUsed(tmpl.ID)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestSelectTrap_ResetsRecentWhenAllFilteredAndRetries(t *testing.T) {

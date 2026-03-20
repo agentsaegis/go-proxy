@@ -3,11 +3,13 @@ package trap
 import (
 	"math/rand"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Selector picks which trap template to use based on the original command context.
 type Selector struct {
+	mu          sync.Mutex
 	templates   []*Template
 	recentTraps map[string]time.Time
 	rng         *rand.Rand
@@ -24,6 +26,9 @@ func NewSelector(templates []*Template) *Selector {
 
 // SelectTrap picks a trap template appropriate for the given original command.
 func (s *Selector) SelectTrap(originalCommand string) *Template {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	keywords := extractKeywords(originalCommand)
 
 	candidates := s.matchTemplates(keywords)
@@ -49,6 +54,8 @@ func (s *Selector) SelectTrap(originalCommand string) *Template {
 
 // MarkUsed records that a trap was recently shown.
 func (s *Selector) MarkUsed(templateID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.recentTraps[templateID] = time.Now()
 }
 

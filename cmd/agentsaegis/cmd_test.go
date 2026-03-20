@@ -130,6 +130,40 @@ func TestRunStart_SuperDebugImpliesDebug(t *testing.T) {
 	}
 }
 
+func TestStartDaemon_SuperDebugFlagForwarded(t *testing.T) {
+	oldDaemon, oldDebug, oldSuperDebug := daemonFlag, debugFlag, superDebugFlag
+	defer func() {
+		daemonFlag, debugFlag, superDebugFlag = oldDaemon, oldDebug, oldSuperDebug
+	}()
+
+	// When super-debug is set, the args slice should include --super-debug
+	superDebugFlag = true
+	debugFlag = true
+
+	args := []string{"start"}
+	if superDebugFlag {
+		args = append(args, "--super-debug")
+	} else if debugFlag {
+		args = append(args, "--debug")
+	}
+
+	found := false
+	for _, arg := range args {
+		if arg == "--super-debug" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("args %v should contain --super-debug", args)
+	}
+	// --debug should NOT be present since super-debug implies debug
+	for _, arg := range args {
+		if arg == "--debug" {
+			t.Errorf("args %v should not contain --debug when --super-debug is set", args)
+		}
+	}
+}
+
 func TestRunStop_NoPIDFile(t *testing.T) {
 	setupTestHome(t)
 

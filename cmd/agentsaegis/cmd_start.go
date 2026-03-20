@@ -92,7 +92,9 @@ func startDaemon(cfg *config.Config) error {
 	}
 
 	args := []string{"start"}
-	if debugFlag {
+	if superDebugFlag {
+		args = append(args, "--super-debug")
+	} else if debugFlag {
 		args = append(args, "--debug")
 	}
 	cmd := exec.Command(exe, args...)

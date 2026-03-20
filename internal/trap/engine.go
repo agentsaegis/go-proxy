@@ -37,6 +37,7 @@ type ActiveTrap struct {
 	Severity        string
 	TrapCommand     string // Visible dangerous command from template
 	OriginalCommand string
+	SessionID       string // Claude Code session ID (set via hook request)
 	InjectedAt      time.Time
 	Triggered       atomic.Bool
 	Resolved        atomic.Bool
@@ -125,6 +126,15 @@ func (e *Engine) SetActiveTrap(trap *ActiveTrap) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.activeTrap = trap
+	e.pendingInject = false
+}
+
+// ClearPendingInject resets the pendingInject flag without setting an active trap.
+// Call this when ShouldInject() returned true but trap injection did not proceed
+// (e.g. template selection failed), to avoid permanently blocking future injections.
+func (e *Engine) ClearPendingInject() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.pendingInject = false
 }
 

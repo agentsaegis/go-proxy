@@ -181,6 +181,7 @@ func (si *StreamInterceptor) handleBlockStop(event SSEEvent) ([]SSEEvent, error)
 				return si.buildTrapResponse(block, event, fullInputJSON, originalCmd, tmpl)
 			}
 			si.logger.Debug("skip injection: no matching template", "command", originalCmd)
+			si.trapEngine.ClearPendingInject()
 		}
 	}
 

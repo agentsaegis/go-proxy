@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/agentsaegis/go-proxy/internal/client"
 	"github.com/agentsaegis/go-proxy/internal/config"
@@ -77,13 +78,19 @@ func runInit(_ *cobra.Command, _ []string) error {
 
 	// Write config file
 	configPath := filepath.Join(configDir, "config.yaml")
-	configContent := fmt.Sprintf(
-		"dashboard_url: %s\napi_token: %s\nproxy_port: 7331\nanthropic_base_url: https://api.anthropic.com\nlog_level: info\n",
-		dashboardURL,
-		apiToken,
-	)
+	cfg := map[string]interface{}{
+		"dashboard_url":     dashboardURL,
+		"api_token":         apiToken,
+		"proxy_port":        7331,
+		"anthropic_base_url": "https://api.anthropic.com",
+		"log_level":         "info",
+	}
+	configContent, marshalErr := yaml.Marshal(cfg)
+	if marshalErr != nil {
+		return fmt.Errorf("marshaling config: %w", marshalErr)
+	}
 
-	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
+	if err := os.WriteFile(configPath, configContent, 0o600); err != nil {
 		return fmt.Errorf("writing config file: %w", err)
 	}
 

@@ -25,7 +25,7 @@ func makeTestHookHandler(t *testing.T) (*HookHandler, *trap.Engine) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cbHandler := trap.NewCallbackHandler(engine, selector, nil, logger, 0)
 
-	hh := NewHookHandler(engine, cbHandler, logger, "test-secret")
+	hh := NewHookHandler(engine, cbHandler, logger, "test-secret", 7331)
 	return hh, engine
 }
 
@@ -336,7 +336,7 @@ func TestHookHandler_NoSecret_AllowAll(t *testing.T) {
 	// Handler with empty secret should not require auth
 	engine := trap.NewEngine(trap.OrgConfig{TrapFrequency: 1})
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	hh := NewHookHandler(engine, nil, logger, "")
+	hh := NewHookHandler(engine, nil, logger, "", 7331)
 
 	req := hookRequest("echo hello", "")
 	rr := httptest.NewRecorder()

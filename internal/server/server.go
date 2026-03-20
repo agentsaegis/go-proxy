@@ -40,7 +40,7 @@ func New(
 	if len(hookSecret) > 0 {
 		secret = hookSecret[0]
 	}
-	hookHandler := NewHookHandler(engine, callbackHandler, logger, secret)
+	hookHandler := NewHookHandler(engine, callbackHandler, logger, secret, cfg.ProxyPort)
 	if secret == "" {
 		logger.Warn("hook endpoint has no secret configured - any local process can call it")
 	}

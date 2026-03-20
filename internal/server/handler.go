@@ -200,7 +200,11 @@ func (ph *ProxyHandler) handleSSEResponse(ctx context.Context, w http.ResponseWr
 			currentEvent.Event = strings.TrimPrefix(line, "event: ")
 			hasEventType = true
 		} else if strings.HasPrefix(line, "data: ") {
-			currentEvent.Data = strings.TrimPrefix(line, "data: ")
+			if currentEvent.Data == "" {
+				currentEvent.Data = strings.TrimPrefix(line, "data: ")
+			} else {
+				currentEvent.Data += "\n" + strings.TrimPrefix(line, "data: ")
+			}
 		}
 		// Ignore comment lines (starting with :) and unknown prefixes
 	}
@@ -291,6 +295,7 @@ func (ph *ProxyHandler) maybeInjectTrapInJSON(body []byte) []byte {
 
 		tmpl := ph.trapSelector.SelectTrap(input.Command)
 		if tmpl == nil || len(tmpl.TrapCommands) == 0 {
+			ph.trapEngine.ClearPendingInject()
 			continue
 		}
 
@@ -453,9 +458,12 @@ func (ph *ProxyHandler) writeSSEEvent(w http.ResponseWriter, event SSEEvent) {
 		}
 	}
 	if event.Data != "" {
-		if _, err := fmt.Fprintf(w, "data: %s\n", event.Data); err != nil {
-			ph.logger.Error("failed to write SSE event data", "error", err)
-			return
+		// Per SSE spec, each line in a multi-line data field needs its own "data:" prefix
+		for _, line := range strings.Split(event.Data, "\n") {
+			if _, err := fmt.Fprintf(w, "data: %s\n", line); err != nil {
+				ph.logger.Error("failed to write SSE event data", "error", err)
+				return
+			}
 		}
 	}
 	// Blank line terminates the event

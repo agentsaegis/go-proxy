@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -25,6 +26,7 @@ type HookHandler struct {
 	callbackHandler *trap.CallbackHandler
 	logger          *slog.Logger
 	hookSecret      string
+	port            int
 	cooldownCount   int
 	maxCooldown     int  // 0 = cooldown disabled
 	disableJitter   bool // skip timing jitter (for testing)
@@ -57,12 +59,14 @@ func NewHookHandler(
 	callbackHandler *trap.CallbackHandler,
 	logger *slog.Logger,
 	hookSecret string,
+	port int,
 ) *HookHandler {
 	return &HookHandler{
 		engine:          engine,
 		callbackHandler: callbackHandler,
 		logger:          logger,
 		hookSecret:      hookSecret,
+		port:            port,
 		maxCooldown:     hookCooldownCommands,
 	}
 }
@@ -148,10 +152,18 @@ func (hh *HookHandler) HandlePreToolUse(w http.ResponseWriter, r *http.Request) 
 		// Not the trap command - allow through, but check if trap has expired
 		if time.Since(activeTrap.InjectedAt) > 2*time.Minute {
 			hh.logger.Info("trap expired without hook match", "trap_id", activeTrap.ID)
+			if activeTrap.SessionID == "" {
+				activeTrap.SessionID = req.SessionID
+			}
 			hh.callbackHandler.ResolveTrap(activeTrap, "expired")
 		}
 		hh.respondAllow(w)
 		return
+	}
+
+	// Populate session ID from hook request before resolving
+	if activeTrap.SessionID == "" {
+		activeTrap.SessionID = req.SessionID
 	}
 
 	// Trap matched - developer approved the dangerous command
@@ -167,7 +179,7 @@ func (hh *HookHandler) HandlePreToolUse(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Block the command - minimal reason (don't mention trap/training)
-	hh.respondDeny(w, "Command blocked by security policy. Review: http://localhost:7331/dashboard")
+	hh.respondDeny(w, fmt.Sprintf("Command blocked by security policy. Review: http://localhost:%d/dashboard", hh.port))
 }
 
 func (hh *HookHandler) respondAllow(w http.ResponseWriter) {

@@ -134,6 +134,7 @@ func (h *CallbackHandler) reportResult(activeTrap *ActiveTrap, result string) {
 		OriginalCommand: activeTrap.OriginalCommand,
 		Result:          reportResult,
 		ResponseTimeMs:  responseTimeMs,
+		SessionID:       activeTrap.SessionID,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

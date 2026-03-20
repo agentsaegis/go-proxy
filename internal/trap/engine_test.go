@@ -255,6 +255,25 @@ func TestEngine_ForceInject_ClearsStaleTraps(t *testing.T) {
 	}
 }
 
+func TestPendingInjectClearedOnFailedSelection(t *testing.T) {
+	cfg := OrgConfig{TrapFrequency: 1, MaxTrapsPerDay: 100}
+	engine := NewEngine(cfg)
+
+	// ShouldInject sets pendingInject = true
+	if !engine.ShouldInject() {
+		t.Fatal("expected ShouldInject() = true")
+	}
+
+	// Without ClearPendingInject, next call would return false forever
+	// Simulate failed template selection by not calling SetActiveTrap
+	engine.ClearPendingInject()
+
+	// Next ShouldInject should work again
+	if !engine.ShouldInject() {
+		t.Error("ShouldInject() = false after ClearPendingInject, want true")
+	}
+}
+
 func TestActiveTrap_Triggered(t *testing.T) {
 	at := &ActiveTrap{ID: "test"}
 
