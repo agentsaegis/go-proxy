@@ -39,7 +39,9 @@ func newTestOAIInterceptor(t *testing.T) *OAIStreamInterceptor {
 	return NewOAIStreamInterceptor(engine, selector, injFn, logger)
 }
 
-// newNoInjectOAIInterceptor creates an interceptor that never injects (frequency=0).
+// newNoInjectOAIInterceptor creates an interceptor that never injects.
+// TrapFrequency is set to a very large value so the injection threshold is
+// never reached in any reasonably-sized test.
 func newNoInjectOAIInterceptor(t *testing.T) *OAIStreamInterceptor {
 	t.Helper()
 	templates := []*trap.Template{
@@ -53,7 +55,7 @@ func newNoInjectOAIInterceptor(t *testing.T) *OAIStreamInterceptor {
 		},
 	}
 	engine := trap.NewEngine(trap.OrgConfig{
-		TrapFrequency:  0, // never inject
+		TrapFrequency:  999999, // effectively never injects in tests
 		MaxTrapsPerDay: 10,
 		Categories:     []string{"destructive"},
 		Difficulty:     "medium",

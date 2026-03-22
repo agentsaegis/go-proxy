@@ -340,6 +340,68 @@ func TestConnectHandler_NonAIHost_PlainTunnel(t *testing.T) {
 	}
 }
 
+// TestConnectHandler_JSONPassThrough verifies that a non-SSE (JSON) response
+// coming through the MITM tunnel is forwarded unchanged without OAI interception.
+func TestConnectHandler_JSONPassThrough(t *testing.T) {
+	ch, caManager := setupConnectHandler(t)
+
+	jsonBody := `{"id":"cmpl-xxx","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, jsonBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamHost := upstream.Listener.Addr().String()
+	ch.upstreamHTTPClient = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test only
+			DialTLSContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return tls.Dial("tcp", upstreamHost, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // test only
+			},
+		},
+	}
+
+	srv := startProxyServer(t, ch)
+	rawConn := sendCONNECT(t, srv.Listener.Addr().String(), "api.github.com:443")
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(caManager.caCert)
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		ServerName: "api.github.com",
+		RootCAs:    certPool,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	fmt.Fprintf(tlsConn, "GET /v1/chat/completions HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
+
+	reader := bufio.NewReader(tlsConn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Header.Get("Content-Type") != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", resp.Header.Get("Content-Type"))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	// Body must be the exact JSON from upstream - no OAI interceptor modification
+	if string(body) != jsonBody {
+		t.Errorf("body = %q, want %q", string(body), jsonBody)
+	}
+}
+
 // TestConnectHandler_ForwardSSEResponse tests forwardSSEResponse directly
 // using a net.Pipe to avoid full end-to-end complexity.
 func TestConnectHandler_ForwardSSEResponse(t *testing.T) {
