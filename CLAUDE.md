@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-AgentsAegis is an open-source security awareness proxy for AI coding tools (currently Claude Code). It sits between Claude Code and the Anthropic API on `localhost:7331`, intercepting API traffic. It occasionally replaces legitimate bash commands in AI responses with realistic but inherently harmless "trap" commands (targeting nonexistent paths, fake remotes, reserved addresses). If a developer approves a trap without noticing, a Claude Code `PreToolUse` hook blocks execution and displays a training message explaining the risk. Results are optionally reported to the AgentsAegis dashboard API for team-level tracking and analytics.
+AgentsAegis is an open-source security awareness proxy for AI coding tools (Claude Code CLI and Claude Desktop). It sits between AI tools and the Anthropic API on `localhost:7331`, intercepting API traffic. It occasionally replaces legitimate bash commands in AI responses with realistic but inherently harmless "trap" commands (targeting nonexistent paths, fake remotes, reserved addresses). If a developer approves a trap without noticing, execution is blocked and a training message is displayed. For Claude Code CLI, blocking uses `PreToolUse` hooks. For Claude Desktop, blocking uses an MCP server that checks commands against the proxy before executing them. Results are optionally reported to the AgentsAegis dashboard API for team-level tracking and analytics.
 
 ## Tech Stack
 
@@ -19,9 +19,20 @@ AgentsAegis is an open-source security awareness proxy for AI coding tools (curr
 ## Architecture
 
 ```
-Claude Code  -->  AgentsAegis Proxy (localhost:7331)  -->  Anthropic API (api.anthropic.com)
-                          |
-                          +--> AgentsAegis Dashboard API (optional, for config + reporting)
+Claude Code CLI  -->  AgentsAegis Proxy (localhost:7331)  -->  Anthropic API (api.anthropic.com)
+                               |
+                               +--> AgentsAegis Dashboard API (optional, for config + reporting)
+
+Claude Desktop  --[ANTHROPIC_BASE_URL]--> AgentsAegis Proxy --> Anthropic API
+       |                                        |
+       +--[MCP stdio]--> agentsaegis mcp -------+
+                          (checks commands via     (POST /hooks/pre-tool-use)
+                           proxy hook endpoint)
+
+Copilot CLI  --[HTTPS_PROXY]--> AgentsAegis Proxy (CONNECT tunnel) --> api.github.com
+                                          |
+                                 TLS MITM via CAManager
+                                 OAIStreamInterceptor (OpenAI SSE format)
 ```
 
 **Data flow for a normal request:**
@@ -38,10 +49,11 @@ Claude Code  -->  AgentsAegis Proxy (localhost:7331)  -->  Anthropic API (api.an
 2. Request-body path: Next API request's `tool_result` block is checked for the trap's `tool_use_id` - detects approval/rejection
 3. `CallbackHandler.ResolveTrap()` reports result to dashboard API, displays training message if missed, cleans up
 
-**Three HTTP endpoints:**
+**Four HTTP endpoints:**
 - `GET /__aegis/health` - health check (used by shell wrapper to detect if proxy is running)
 - `POST /hooks/pre-tool-use` - Claude Code PreToolUse hook endpoint
-- `/ (catch-all)` - reverse proxy to Anthropic API
+- `POST /hooks/inject-trap` - Copilot hook injection endpoint
+- `/ (catch-all)` - reverse proxy to Anthropic API; also handles CONNECT for TLS MITM tunnels
 
 ## Directory Map
 
@@ -55,9 +67,18 @@ cmd/
     cmd_status.go        # `status` command - shows proxy running state, port, org connection
     cmd_report.go        # `report` command - fetches personal trap stats from dashboard
     cmd_setup_shell.go   # `setup-shell` / `remove-shell` - manages shell wrapper in .zshrc/.bashrc/.config/fish
+    cmd_setup_desktop.go # `setup-desktop` / `remove-desktop` - patches Claude Desktop MCP config
+    cmd_mcp.go           # `mcp` command - runs as MCP server (stdio transport) for Claude Desktop
+    cmd_launch.go        # `launch claude-desktop` - launches Desktop app with proxy env var
+    cmd_hook.go          # `hook` command - bridge for Copilot/VS Code PreToolUse hooks (stdin/stdout)
+    cmd_setup_copilot.go # `setup-copilot` / `remove-copilot` - configures Copilot hooks + MCP in VS Code
+    cmd_trust_cert.go    # `trust-cert` / `untrust-cert` - adds/removes proxy CA from system trust store
+    cmd_reload.go        # `reload` command - sends SIGHUP to daemon for hot config reload
+    cmd_service.go       # `install-service` / `uninstall-service` - launchd (macOS) / systemd (Linux) service management
     cmd_test.go          # Tests for all CLI commands
     cmd_init_test.go     # Tests for init command validation
     cmd_status_test.go   # Tests for status command
+    cmd_setup_desktop_test.go # Tests for setup-desktop/remove-desktop
 
 internal/
   config/
@@ -68,11 +89,17 @@ internal/
     server.go            # HTTP server setup, route registration, Start/Shutdown
     handler.go           # ProxyHandler - main proxy logic, SSE/JSON interception, trap injection
     stream.go            # StreamInterceptor - SSE event parsing, bash block buffering, delta rebuilding
+    stream_oai.go        # OAIStreamInterceptor - OpenAI-format SSE parser for Copilot CLI CONNECT tunnels
     hook.go              # HookHandler - PreToolUse hook processing, command matching, cooldown
+    tls.go               # CAManager - root CA generation/loading, per-host cert generation for TLS MITM
+    connect.go           # ConnectHandler - HTTP CONNECT tunnel handler (TLS MITM for AI APIs, plain TCP otherwise)
     handler_test.go      # Proxy handler tests
     stream_test.go       # Stream interceptor tests
+    stream_oai_test.go   # OAI stream interceptor tests
     hook_test.go         # Hook handler tests
     server_test.go       # Server integration tests
+    tls_test.go          # CA manager and cert generation tests
+    connect_test.go      # CONNECT tunnel handler tests
 
   trap/
     engine.go            # Engine - trap injection decision logic (frequency, jitter, cooldown, active trap)
@@ -97,6 +124,13 @@ internal/
       secret-exposure/   # env console.log, git add secrets
       privilege-escalation/ # chmod 777, docker privileged
       infrastructure/    # aws s3 nuke
+
+  mcp/
+    server.go            # MCP JSON-RPC 2.0 server over stdio (initialize, tools/list, tools/call)
+    tools.go             # Bash tool definition, command execution, trap file fallback, training message
+    hook_client.go       # HTTP client for proxy's /hooks/pre-tool-use endpoint
+    server_test.go       # MCP server protocol tests
+    hook_client_test.go  # Hook client tests
 
   daemon/
     daemon.go            # PID file management (read/write/remove), IsRunning check
@@ -159,15 +193,46 @@ docs/                    # Documentation (untracked, not in git yet)
 4. Otherwise result = "missed"
 5. Calls `CallbackHandler.ResolveTrap()`
 
-### 4. Shell wrapper setup
+### 4. Shell wrapper setup (Claude Code CLI)
 
 1. `agentsaegis setup-shell` runs `runSetupShell()` (cmd_setup_shell.go:129)
 2. `shellProfiles()` detects shell from `$SHELL` env var
-3. Generates `claude()` wrapper function that:
-   - Checks health endpoint `curl http://localhost:PORT/__aegis/health`
+3. Generates `_aegis_ensure_proxy()` helper and `claude()` wrapper function that:
+   - Auto-starts proxy daemon if not running (waits up to 3s for health)
    - If proxy running: sets `ANTHROPIC_BASE_URL=http://localhost:PORT` then runs `command claude`
-   - If proxy down: runs `command claude` directly (transparent fallback)
-4. Removes any existing marker block or legacy export, appends new wrapper
+   - If proxy can't start: runs `command claude` directly (transparent fallback)
+   - After Claude exits with non-zero: checks if proxy died and restarts it
+4. Also generates `copilot()` wrapper with same auto-start + hook injection
+5. Removes any existing marker block or legacy export, appends new wrapper
+
+### 5. Trap detection via MCP server (Claude Desktop)
+
+1. Claude Desktop spawns `agentsaegis mcp` as MCP server child process (stdio transport)
+2. MCP server provides single `bash` tool via `tools/list`
+3. LLM generates `tool_use` with `name: "bash"` - proxy injects trap in API response (same as flow 1)
+4. Claude Desktop shows confirmation dialog with trap command - user approves or denies
+5. If approved: Claude Desktop sends `tools/call` to MCP server via stdin
+6. MCP server POSTs to `http://localhost:PORT/hooks/pre-tool-use` (same hook endpoint as flow 2)
+7. If hook returns deny: MCP server returns plain text training message with `isError: true`
+8. If hook returns allow: MCP server executes command via `os/exec`, returns output
+9. If proxy unreachable: MCP server checks `~/.agentsaegis/traps/*.json` as fallback, then executes if no match (fail-open)
+
+### 6. Desktop launch wrapper
+
+1. `agentsaegis launch claude-desktop` checks proxy health
+2. If proxy not running: starts it as daemon (`agentsaegis start --daemon`)
+3. Launches `/Applications/Claude.app/Contents/MacOS/Claude` with `ANTHROPIC_BASE_URL=http://localhost:PORT`
+4. Exits immediately (Claude Desktop runs independently)
+
+### 7. Trap detection via Copilot hooks (GitHub Copilot)
+
+1. Copilot agent mode fires PreToolUse hook before executing a bash command
+2. Hook spawns `agentsaegis hook` which reads hook input JSON from stdin
+3. `agentsaegis hook` extracts `toolName` and `toolArgs.command`
+4. POSTs to `http://localhost:PORT/hooks/pre-tool-use` (same endpoint as Claude Code)
+5. If proxy returns deny: writes `{"permissionDecision":"deny","permissionDecisionReason":"..."}` to stdout
+6. If proxy returns allow (or is unreachable): no output (fail-open, Copilot allows execution)
+7. Copilot also uses `agentsaegis mcp` as MCP server for bash tool execution (same as Claude Desktop flow 5)
 
 ## Data Models
 
@@ -238,6 +303,52 @@ go run ./cmd/agentsaegis start --debug
 ### Run with super-debug mode (trap on every command)
 ```bash
 go run ./cmd/agentsaegis start --super-debug
+```
+
+### Run as MCP server (for Claude Desktop)
+```bash
+go run ./cmd/agentsaegis mcp
+# Reads JSON-RPC from stdin, writes to stdout, logs to stderr
+```
+
+### Setup Claude Desktop integration
+```bash
+agentsaegis setup-desktop    # Add MCP server to Claude Desktop config
+agentsaegis remove-desktop   # Remove MCP server from Claude Desktop config
+```
+
+### Setup Copilot integration (VS Code agent mode)
+```bash
+agentsaegis setup-copilot    # Add hooks + MCP server to VS Code/Copilot
+agentsaegis remove-copilot   # Remove hooks + MCP server from VS Code/Copilot
+```
+
+### Trust / untrust proxy CA for Copilot HTTPS interception
+```bash
+sudo agentsaegis trust-cert    # Add proxy CA to system trust store (macOS/Linux)
+sudo agentsaegis untrust-cert  # Remove proxy CA from system trust store
+```
+The CA is generated automatically on first proxy start at `~/.agentsaegis/ca.pem`
+(key at `~/.agentsaegis/ca-key.pem`, permissions 0600).
+Copilot CLI uses `HTTPS_PROXY=http://localhost:PORT` (set by the shell wrapper) which
+requires the CA to be trusted for TLS MITM to work.
+
+### Launch Claude Desktop with proxy
+```bash
+agentsaegis launch claude-desktop
+# Starts proxy if needed, launches Desktop with ANTHROPIC_BASE_URL set
+```
+
+### Reload proxy config without restart
+```bash
+agentsaegis reload
+# Sends SIGHUP to daemon - reloads config.yaml, dashboard settings, log level
+```
+
+### Install as system service (auto-start on login, restart on crash)
+```bash
+agentsaegis install-service    # macOS: launchd plist, Linux: systemd user unit
+agentsaegis uninstall-service  # Remove the service
 ```
 
 ### Run unit tests
@@ -320,7 +431,7 @@ To write a new test:
 
 ## Gotchas
 
-- **Fail-open by design.** This is the most important architectural decision in the proxy. If the proxy is down, Claude Code hooks fail open - commands execute without any trap checking. The shell wrapper (`claude()` function) mitigates this by only setting `ANTHROPIC_BASE_URL` when the proxy health check passes. If the proxy is unreachable, Claude Code talks directly to Anthropic with no interception at all. The trap file mechanism (`~/.agentsaegis/traps/*.json`) exists as a fallback for detecting active traps even if the hook HTTP call fails. Any future developer must preserve this fail-open guarantee - the proxy must never prevent Claude Code from working.
+- **Fail-open by design.** This is the most important architectural decision in the proxy. If the proxy is down, Claude Code hooks fail open - commands execute without any trap checking. The shell wrapper (`claude()` function) auto-starts the proxy if it's not running, and restarts it after a non-zero exit. If the proxy is unreachable even after auto-start, Claude Code talks directly to Anthropic with no interception at all. The trap file mechanism (`~/.agentsaegis/traps/*.json`) exists as a fallback for detecting active traps even if the hook HTTP call fails. Any future developer must preserve this fail-open guarantee - the proxy must never prevent Claude Code from working.
 
 - **Trap commands must be inherently safe.** `ValidateTrapSafety()` rejects commands that could cause real harm. All `rm` targets must be under `/tmp/.aegis-trap*`, all network destinations must be `0.0.0.0` (connection refused), all packages must use `aegis-trap-nonexistent` prefix, all git operations must use `--dry-run` or `aegis-nonexistent-remote`. If you add a trap that fails safety validation, it's silently dropped at startup.
 
@@ -332,19 +443,45 @@ To write a new test:
 
 - **Hook cooldown.** After a trap is resolved via the hook, `HookHandler` suppresses the next 10 commands (`hookCooldownCommands`) to avoid re-blocking related commands in the same sequence.
 
+- **SSE panic recovery.** The SSE interceptor runs inside `processSSEStream()` with `defer recover()`. If the interceptor panics, remaining upstream data is passed through unmodified via `drainSSEPassthrough()`. Similarly, `safeInjectTrapInJSON()` wraps JSON injection with panic recovery. The proxy never crashes from a bad trap injection.
+
+- **Upstream timeout is 120s for initial response** (`ResponseHeaderTimeout` on the transport). This returns 504 if Anthropic doesn't start responding within 120 seconds, but does NOT cut off long-running SSE streams once headers are received.
+
 - **SSE buffering.** The `StreamInterceptor` buffers ALL events for a bash tool_use content block until `content_block_stop`. Non-bash blocks pass through immediately. If injection fails, buffered events are flushed unchanged.
 
 - **Scanner buffer size.** SSE scanner uses a 1MB max buffer (`handler.go:159`) for large payloads. If an SSE event exceeds this, the scanner will error.
 
 - **Config file location is hardcoded** to `~/.agentsaegis/config.yaml`. The `AEGIS_` env prefix overrides config values but there's no CLI flag to specify a different config path.
 
+- **SIGHUP reloads config without restart.** `agentsaegis reload` sends SIGHUP to the daemon. The proxy re-reads config.yaml, fetches dashboard config, and updates trap frequency, categories, difficulty, and log level. Port and upstream URL require a full restart.
+
+- **Remote config polling every 5 minutes.** When an API token is configured, the proxy polls `GET /api/proxy/config` on the dashboard. If the dashboard is unreachable, current config is kept. Disabled in super-debug mode.
+
+- **Heartbeat file at `~/.agentsaegis/heartbeat`** is written every 30 seconds with a Unix timestamp. Cleaned up on shutdown. Can be used by external tools to detect if the proxy is alive without an HTTP request.
+
+- **Hook health monitor warns but never denies.** The `agentsaegis hook` command checks proxy health before calling hook endpoints. If the proxy is down, it warns to stderr (up to 5 times) and allows the command. State is tracked in `~/.agentsaegis/hook_health_failures`.
+
+- **`install-service` writes the absolute binary path** to the plist/unit file. After a Homebrew upgrade that changes the binary path, re-run `install-service`.
+
 - **The shell wrapper uses a `claude()` function**, not an alias or env export. This means the proxy is only used when running `claude` - other tools using the Anthropic API won't be proxied unless they also use `ANTHROPIC_BASE_URL`.
+
+- **The `copilot()` shell wrapper sets `HTTPS_PROXY`** rather than injecting hook files. Copilot CLI routes all HTTPS traffic through the proxy as a CONNECT tunnel. The proxy performs TLS MITM for `api.github.com` using the CA from `~/.agentsaegis/ca.pem`. The CA must be trusted by the system (via `sudo agentsaegis trust-cert`) for TLS MITM to work without TLS errors.
+
+- **CONNECT MITM only targets known AI API hosts** (`api.github.com`). All other CONNECT targets are passed through as plain TCP tunnels without TLS termination. To add more hosts, update `mitmHosts` in `internal/server/connect.go`.
+
+- **The TLS proxy CA key** is stored at `~/.agentsaegis/ca-key.pem` with 0600 permissions. The CA cert is at `~/.agentsaegis/ca.pem` (0644). Both are generated on first proxy start if absent. After a Homebrew upgrade, the CA files persist; only re-run `sudo agentsaegis trust-cert` if the key was rotated.
 
 - **`--super-debug` mode** injects a trap on every single bash command and auto-clears stale traps. It also disables cooldown and jitter on the hook handler. Use it for testing trap injection/detection mechanics.
 
 - **Trap templates are embedded at compile time** via `go:embed all:traps` in `templates.go`. Changes to YAML files require recompilation. There's no runtime template loading.
 
 - **The `expired` result is mapped to `missed`** when reporting to the dashboard API (callback.go:123) because the DB constraint only allows missed/caught/edited.
+
+- **MCP server is a separate process** spawned by Claude Desktop as a child process. It communicates via stdio (JSON-RPC 2.0) and checks commands by POSTing to the proxy's hook endpoint over HTTP. If the proxy is down, it falls back to checking trap files on disk, then executes the command (fail-open).
+
+- **Claude Desktop launch wrapper** requires the Desktop app to respect `ANTHROPIC_BASE_URL` env var. If the Electron app doesn't read this env var, API traffic won't be proxied and trap injection won't work (the MCP server will still block traps via hook/trap-file fallback).
+
+- **`agentsaegis setup-desktop` writes the absolute binary path** to Claude Desktop's config. After a Homebrew upgrade that changes the binary path, re-run `setup-desktop`.
 
 ## External Services
 
