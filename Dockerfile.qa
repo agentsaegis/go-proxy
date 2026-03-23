@@ -1,0 +1,57 @@
+# Stage 1: Build agentsaegis binary
+FROM golang:1.26-bookworm AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN go build -o /agentsaegis ./cmd/agentsaegis
+
+# Stage 2: Runtime environment with Claude Code + Copilot CLI
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    bash \
+    jq \
+    git \
+    gosu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 LTS via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code
+
+# Copilot CLI - try npm package, fall back gracefully
+RUN npm install -g @anthropic-ai/copilot-cli 2>/dev/null || \
+    npm install -g @github-copilot/cli 2>/dev/null || \
+    echo "WARNING: copilot CLI not available via npm - copilot tests will be skipped"
+
+# agentsaegis binary
+COPY --from=builder /agentsaegis /usr/local/bin/agentsaegis
+
+# QA scripts
+COPY scripts/qa-docker-entrypoint.sh /usr/local/bin/qa-docker-entrypoint.sh
+COPY scripts/qa-docker-claude.sh /usr/local/bin/qa-docker-claude.sh
+COPY scripts/qa-docker-copilot.sh /usr/local/bin/qa-docker-copilot.sh
+RUN chmod +x \
+    /usr/local/bin/qa-docker-entrypoint.sh \
+    /usr/local/bin/qa-docker-claude.sh \
+    /usr/local/bin/qa-docker-copilot.sh
+
+# Non-root user for realistic CLI behavior
+RUN useradd -m -s /bin/bash qa
+
+WORKDIR /workspace
+
+ENTRYPOINT ["qa-docker-entrypoint.sh"]

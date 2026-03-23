@@ -351,6 +351,16 @@ agentsaegis install-service    # macOS: launchd plist, Linux: systemd user unit
 agentsaegis uninstall-service  # Remove the service
 ```
 
+### Run QA tests in Docker (isolated)
+```bash
+make qa-docker          # Run all CLI tests (Claude + Copilot)
+make qa-docker-claude   # Run Claude Code tests only
+make qa-docker-copilot  # Run Copilot tests only
+```
+Requires Docker. Auth requirements:
+- Claude: `ANTHROPIC_API_KEY` env var must be set
+- Copilot: `~/.copilot/` and/or `~/.config/gh/` must exist with valid auth, or `GITHUB_TOKEN` set
+
 ### Run unit tests
 ```bash
 make test
@@ -482,6 +492,16 @@ To write a new test:
 - **Claude Desktop launch wrapper** requires the Desktop app to respect `ANTHROPIC_BASE_URL` env var. If the Electron app doesn't read this env var, API traffic won't be proxied and trap injection won't work (the MCP server will still block traps via hook/trap-file fallback).
 
 - **`agentsaegis setup-desktop` writes the absolute binary path** to Claude Desktop's config. After a Homebrew upgrade that changes the binary path, re-run `setup-desktop`.
+
+- **Docker QA uses `--super-debug` mode** for guaranteed trap injection on every command. Container entrypoint starts proxy as `qa` user (non-root) via `gosu`, then drops privileges for test scripts.
+
+- **Container CA trust runs as root** in the entrypoint (before dropping to `qa`). The proxy CA is generated at proxy start, then `agentsaegis trust-cert` installs it to `/usr/local/share/ca-certificates/` and `update-ca-certificates` rebuilds the system bundle. If TLS MITM tests fail, this step likely failed.
+
+- **Host auth is mounted read-only** (`~/.copilot/:ro`, `~/.config/gh/:ro`). Container never writes to host credentials. If the directories don't exist, the mount is skipped and Copilot tests are skipped (not failed).
+
+- **Copilot CLI npm package name may differ** from the Homebrew formula. `Dockerfile.qa` tries `@anthropic-ai/copilot-cli` then `@github-copilot/cli`. If neither installs, copilot QA tests are skipped automatically.
+
+- **`scripts/qa-docker.sh` must be run from repo root** (or via `make qa-docker`). It sets the Docker build context to the repo root.
 
 ## External Services
 
