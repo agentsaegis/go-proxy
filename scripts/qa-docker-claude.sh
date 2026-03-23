@@ -74,8 +74,10 @@ fi
 LOG_FILE="$HOME/.agentsaegis/log"
 if [ -f "$LOG_FILE" ] && grep -qi "inject\|trap" "$LOG_FILE" 2>/dev/null; then
     pass "Test 1b: proxy log contains trap/inject signal"
+elif [ -f "$LOG_FILE" ]; then
+    fail "Test 1b: proxy log exists but contains no trap/inject signal"
 else
-    pass "Test 1b: (proxy log check skipped - log not available or no match)"
+    fail "Test 1b: proxy log not found at $LOG_FILE"
 fi
 
 # Assert: output contains blocking or training signal
@@ -84,6 +86,7 @@ if echo "$CLAUDE_OUT" | grep -qi "blocked\|agentsaegis\|denied\|security\|traini
 else
     # Not a hard failure - Claude might show the tool result differently
     pass "Test 1c: (blocking signal not found in output - may be OK depending on hook response format)"
+    echo "  (soft pass - output format may vary)"
 fi
 
 echo
@@ -99,7 +102,7 @@ agentsaegis start --daemon 2>/dev/null || true
 # Wait for health
 ELAPSED=0
 while ! curl -sf http://localhost:7331/__aegis/health >/dev/null 2>&1; do
-    sleep 0.5
+    sleep 1
     ELAPSED=$((ELAPSED + 1))
     if [ "$ELAPSED" -ge 10 ]; then
         fail "Test 2: proxy did not restart in time"
@@ -126,7 +129,7 @@ agentsaegis start --super-debug --daemon 2>/dev/null || true
 # Wait for health again
 ELAPSED=0
 while ! curl -sf http://localhost:7331/__aegis/health >/dev/null 2>&1; do
-    sleep 0.5
+    sleep 1
     ELAPSED=$((ELAPSED + 1))
     if [ "$ELAPSED" -ge 10 ]; then
         break

@@ -84,15 +84,19 @@ fi
 LOG_FILE="$HOME/.agentsaegis/log"
 if [ -f "$LOG_FILE" ] && grep -qi "CONNECT\|connect\|tunnel" "$LOG_FILE" 2>/dev/null; then
     pass "Test 1b: proxy log shows CONNECT tunnel activity"
+elif [ -f "$LOG_FILE" ]; then
+    fail "Test 1b: proxy log exists but contains no CONNECT/tunnel signal"
 else
-    pass "Test 1b: (CONNECT log check skipped - not available)"
+    fail "Test 1b: proxy log not found at $LOG_FILE"
 fi
 
 # Assert: proxy log shows OAI interception
 if [ -f "$LOG_FILE" ] && grep -qi "oai\|openai\|inject\|trap" "$LOG_FILE" 2>/dev/null; then
     pass "Test 1c: proxy log shows OAI stream interception/trap injection"
+elif [ -f "$LOG_FILE" ]; then
+    fail "Test 1c: proxy log exists but contains no OAI/inject/trap signal"
 else
-    pass "Test 1c: (OAI interception log check skipped - not available)"
+    fail "Test 1c: proxy log not found at $LOG_FILE"
 fi
 
 echo
@@ -102,8 +106,11 @@ echo "[copilot-qa] Test 2: MCP server bash tool"
 
 rm -f /tmp/.aegis_canary_*
 
-MCP_OUT="$(echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash","arguments":{"command":"echo mcp-copilot-test"}}}' \
-    | agentsaegis mcp 2>/dev/null)" || true
+MCP_OUT="$(printf '%s\n%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"qa","version":"1"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash","arguments":{"command":"echo mcp-copilot-test"}}}' \
+  | agentsaegis mcp 2>/dev/null)" || true
 
 if echo "$MCP_OUT" | grep -q "mcp-copilot-test"; then
     pass "Test 2a: MCP server executed command and returned output"

@@ -39,16 +39,24 @@ while true; do
         fi
         exit 1
     fi
-    sleep 0.5
+    sleep 1
     ELAPSED=$((ELAPSED + 1))
 done
 
-# Trust proxy CA cert (runs as root since we need system-wide trust)
+# Trust proxy CA cert (runs as root - direct copy, no sudo needed)
 echo "[entrypoint] Trusting proxy CA cert..."
-gosu qa agentsaegis trust-cert 2>/dev/null || true
-# Also manually install if the command wrote the cert to system directories
-update-ca-certificates 2>/dev/null || true
-echo "[entrypoint] CA trust complete."
+CA_PATH=/home/qa/.agentsaegis/ca.pem
+if [ -f "$CA_PATH" ]; then
+    cp "$CA_PATH" /usr/local/share/ca-certificates/agentsaegis.crt
+    update-ca-certificates
+    echo "[entrypoint] CA cert trusted."
+else
+    echo "[entrypoint] ERROR: CA cert not found at $CA_PATH"
+    echo "  The proxy should have generated it during startup."
+    echo "  Check proxy logs:"
+    tail -20 /home/qa/.agentsaegis/log 2>/dev/null || true
+    exit 1
+fi
 echo
 
 # Run target tests
