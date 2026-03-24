@@ -17,8 +17,23 @@ import (
 
 // mitmHosts is the set of hostnames for which TLS MITM interception is performed.
 // CONNECT requests to all other hosts are tunnelled as plain TCP without TLS termination.
+// errSSEPassthrough is returned by forwardRequest when a non-intercepted SSE
+// stream has been handed off to a background goroutine. The MITM tunnel loop
+// should stop reading further requests on this connection.
+var errSSEPassthrough = fmt.Errorf("SSE passthrough active")
+
+// errSSEIntercepted is returned by forwardRequest after an intercepted SSE
+// stream (e.g. /chat/completions) has been fully written. The response was
+// sent with Connection: close because we strip Transfer-Encoding and
+// Content-Length for line-by-line trap injection, so the client relies on
+// connection close to detect end-of-body (RFC 7230 §3.3.3).
+var errSSEIntercepted = fmt.Errorf("intercepted SSE stream completed")
+
 var mitmHosts = map[string]bool{
-	"api.github.com": true,
+	"api.github.com":                    true,
+	"api.individual.githubcopilot.com":  true,
+	"api.business.githubcopilot.com":    true,
+	"api.enterprise.githubcopilot.com":  true,
 }
 
 // ConnectHandler handles HTTP CONNECT requests. For known AI API hosts it
@@ -55,6 +70,11 @@ func NewConnectHandler(
 			Transport: &http.Transport{
 				ResponseHeaderTimeout: 120 * time.Second,
 				TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+				// Force HTTP/1.1: the MITM tunnel writes HTTP/1.1 back to the
+				// client, so the upstream connection must also be HTTP/1.1 to
+				// avoid HTTP/2 framing mismatches (GOAWAY errors).
+				ForceAttemptHTTP2: false,
+				TLSNextProto:     make(map[string]func(string, *tls.Conn) http.RoundTripper),
 			},
 		},
 	}
@@ -133,7 +153,31 @@ func (ch *ConnectHandler) handleMITMTunnel(conn net.Conn, hostname string) {
 		}
 
 		if fwdErr := ch.forwardRequest(tlsConn, req, hostname); fwdErr != nil {
+			if fwdErr == errSSEPassthrough {
+				// SSE body is being streamed by a background goroutine.
+				// Stop the request loop but don't close the connection -
+				// the goroutine owns it now and will write until done.
+				ch.logger.Debug("SSE passthrough active, handing off connection", "hostname", hostname)
+				// Block until the connection is closed by the remote end
+				// (read will return when the client disconnects).
+				buf := make([]byte, 1)
+				for {
+					if _, err := tlsConn.Read(buf); err != nil {
+						return
+					}
+				}
+			}
+			if fwdErr == errSSEIntercepted {
+				// Intercepted SSE stream was fully written with Connection: close.
+				// Close the connection so the client sees EOF and knows the body ended.
+				ch.logger.Debug("intercepted SSE stream completed, closing connection", "hostname", hostname)
+				return
+			}
 			ch.logger.Debug("forwarding tunneled request failed", "hostname", hostname, "error", fwdErr)
+			return
+		}
+		// Close after responding to a Connection: close request
+		if req.Close {
 			return
 		}
 	}
@@ -161,6 +205,7 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 	// Prevent gzip so we can parse SSE for trap injection
 	upReq.Header.Del("Accept-Encoding")
 
+	ch.logger.Debug("MITM forwarding request", "method", req.Method, "url", upstreamURL)
 	resp, err := ch.upstreamHTTPClient.Do(upReq)
 	if err != nil {
 		errResp := &http.Response{
@@ -178,8 +223,46 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 	defer resp.Body.Close()
 
 	contentType := resp.Header.Get("Content-Type")
+	ch.logger.Debug("MITM upstream response", "status", resp.StatusCode, "content_type", contentType, "url", upstreamURL)
+
+	// Only intercept chat/completions SSE for trap injection.
+	// Other SSE endpoints (like /mcp/readonly) must pass through unchanged.
+	isChatSSE := strings.Contains(contentType, "text/event-stream") &&
+		strings.Contains(req.RequestURI, "/chat/completions")
+	if isChatSSE {
+		ch.logger.Info("MITM SSE stream detected, intercepting", "url", upstreamURL)
+		if err := ch.forwardSSEResponse(conn, resp); err != nil {
+			return fmt.Errorf("forwarding SSE response: %w", err)
+		}
+		return errSSEIntercepted
+	}
+
+	// For non-intercepted SSE streams (like /mcp/readonly), write headers
+	// then stream the body without blocking the request loop. resp.Write()
+	// would block until the SSE stream ends, preventing subsequent requests
+	// on this connection.
 	if strings.Contains(contentType, "text/event-stream") {
-		return ch.forwardSSEResponse(conn, resp)
+		ch.logger.Debug("MITM passthrough SSE (non-blocking)", "url", upstreamURL)
+		// Write headers
+		var headerBuf strings.Builder
+		fmt.Fprintf(&headerBuf, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
+		for key, values := range resp.Header {
+			for _, v := range values {
+				fmt.Fprintf(&headerBuf, "%s: %s\r\n", key, v)
+			}
+		}
+		headerBuf.WriteString("\r\n")
+		if _, err := conn.Write([]byte(headerBuf.String())); err != nil {
+			return fmt.Errorf("writing SSE passthrough headers: %w", err)
+		}
+		// Stream body in background - this SSE may be long-lived
+		go func() {
+			defer resp.Body.Close()
+			io.Copy(conn, resp.Body)
+		}()
+		// Return a sentinel error to break out of the request loop for this
+		// connection since we handed off the body to a goroutine.
+		return errSSEPassthrough
 	}
 
 	return resp.Write(conn)
@@ -190,13 +273,22 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 func (ch *ConnectHandler) forwardSSEResponse(conn net.Conn, resp *http.Response) error {
 	writer := bufio.NewWriter(conn)
 
-	// Write HTTP response status and headers
+	// Write HTTP response status and headers.
+	// Remove Transfer-Encoding and Content-Length since we re-frame the body
+	// line-by-line for trap injection (no longer chunked or fixed-length).
+	// Add Connection: close so the client knows end-of-body is signalled by
+	// connection close (RFC 7230 §3.3.3).
 	fmt.Fprintf(writer, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
 	for key, values := range resp.Header {
+		lower := strings.ToLower(key)
+		if lower == "transfer-encoding" || lower == "content-length" || lower == "connection" {
+			continue
+		}
 		for _, v := range values {
 			fmt.Fprintf(writer, "%s: %s\r\n", key, v)
 		}
 	}
+	fmt.Fprintf(writer, "Connection: close\r\n")
 	fmt.Fprintf(writer, "\r\n")
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("flushing SSE response headers: %w", err)
@@ -212,12 +304,21 @@ func (ch *ConnectHandler) forwardSSEResponse(conn net.Conn, resp *http.Response)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 
+	lineCount := 0
 	for scanner.Scan() {
 		line := scanner.Text()
+		lineCount++
 		outputLines, procErr := interceptor.ProcessLine(line)
 		if procErr != nil {
 			ch.logger.Error("OAI SSE processing error", "error", procErr)
 			outputLines = []string{line}
+		}
+		if lineCount <= 10 || lineCount%50 == 0 {
+			preview := line
+			if len(preview) > 300 {
+				preview = preview[:300]
+			}
+			ch.logger.Debug("OAI SSE line", "n", lineCount, "in_len", len(line), "out_count", len(outputLines), "preview", preview)
 		}
 		for _, outLine := range outputLines {
 			fmt.Fprintln(writer, outLine)
@@ -226,6 +327,7 @@ func (ch *ConnectHandler) forwardSSEResponse(conn net.Conn, resp *http.Response)
 			return fmt.Errorf("flushing SSE output: %w", flushErr)
 		}
 	}
+	ch.logger.Debug("OAI SSE stream ended", "total_lines", lineCount, "scan_err", scanner.Err())
 
 	return scanner.Err()
 }

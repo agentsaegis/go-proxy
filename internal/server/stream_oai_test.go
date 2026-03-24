@@ -130,19 +130,19 @@ func TestOAIStreamInterceptor_NonShellToolCall_PassThrough(t *testing.T) {
 	}
 }
 
-func TestOAIStreamInterceptor_ShellToolCall_Buffered(t *testing.T) {
+func TestOAIStreamInterceptor_ShellToolCall_PassThrough(t *testing.T) {
 	oi := newNoInjectOAIInterceptor(t)
 	line := `data: {"id":"chatcmpl-xxx","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_xxx","function":{"name":"shell","arguments":""}}]},"finish_reason":null}]}`
 	out, err := oi.ProcessLine(line)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(out) != 0 {
-		t.Errorf("shell tool call name line should be buffered, got %d lines: %v", len(out), out)
+	if len(out) != 1 || out[0] != line {
+		t.Errorf("shell tool call name line should pass through immediately, got %v", out)
 	}
 }
 
-func TestOAIStreamInterceptor_AllShellToolNames_Buffered(t *testing.T) {
+func TestOAIStreamInterceptor_AllShellToolNames_PassThrough(t *testing.T) {
 	names := []string{"shell", "bash", "run_command", "execute_command", "terminal",
 		"Shell", "BASH", "Run_Command"}
 	for _, name := range names {
@@ -150,30 +150,31 @@ func TestOAIStreamInterceptor_AllShellToolNames_Buffered(t *testing.T) {
 			oi := newNoInjectOAIInterceptor(t)
 			line := `data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"` + name + `","arguments":""}}]},"finish_reason":null}]}`
 			out, _ := oi.ProcessLine(line)
-			if len(out) != 0 {
-				t.Errorf("shell tool name %q should be buffered", name)
+			if len(out) != 1 || out[0] != line {
+				t.Errorf("shell tool name %q should pass through immediately, got %v", name, out)
 			}
 		})
 	}
 }
 
-func TestOAIStreamInterceptor_FinishReason_FlushesBuffered(t *testing.T) {
+func TestOAIStreamInterceptor_FinishReason_PassThrough(t *testing.T) {
 	oi := newNoInjectOAIInterceptor(t)
 
-	bufferedLines := []string{
+	// All lines pass through immediately in passthrough mode
+	passThroughLines := []string{
 		`data: {"id":"chatcmpl-xxx","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_xxx","function":{"name":"shell","arguments":""}}]},"finish_reason":null}]}`,
 		`data: {"id":"chatcmpl-xxx","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"comm"}}]},"finish_reason":null}]}`,
 		`data: {"id":"chatcmpl-xxx","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"and\":\"ls -la\"}"}}]},"finish_reason":null}]}`,
 	}
 	finishLine := `data: {"id":"chatcmpl-xxx","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`
 
-	for _, line := range bufferedLines {
+	for _, line := range passThroughLines {
 		out, err := oi.ProcessLine(line)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(out) != 0 {
-			t.Errorf("line should be buffered: %q", line)
+		if len(out) != 1 || out[0] != line {
+			t.Errorf("line should pass through immediately: %q, got %v", line, out)
 		}
 	}
 
@@ -181,52 +182,11 @@ func TestOAIStreamInterceptor_FinishReason_FlushesBuffered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error on finish_reason: %v", err)
 	}
-	if len(out) == 0 {
-		t.Error("finish_reason should flush buffered lines, got empty output")
-	}
-	// Last line in output must be the finish_reason line
-	if out[len(out)-1] != finishLine {
-		t.Errorf("last output line = %q, want finish_reason line", out[len(out)-1])
-	}
-	// Buffered lines should appear before the finish_reason line
-	if len(out) < 2 {
-		t.Errorf("expected at least 2 output lines (buffered + finish), got %d", len(out))
+	if len(out) != 1 || out[0] != finishLine {
+		t.Errorf("finish_reason line should pass through: got %v", out)
 	}
 }
 
-func TestOAIStreamInterceptor_TrapInjection_ReplacesCommand(t *testing.T) {
-	oi := newTestOAIInterceptor(t)
-
-	lines := []string{
-		`data: {"id":"chatcmpl-xxx","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_xxx","function":{"name":"shell","arguments":""}}]},"finish_reason":null}]}`,
-		`data: {"id":"chatcmpl-xxx","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls -la\"}"}}]},"finish_reason":null}]}`,
-		`data: {"id":"chatcmpl-xxx","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-	}
-
-	var allOutput []string
-	for _, line := range lines {
-		out, err := oi.ProcessLine(line)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		allOutput = append(allOutput, out...)
-	}
-
-	trapCmd := "rm -rf /tmp/.aegis-trap-test"
-	foundTrap := false
-	for _, l := range allOutput {
-		if strings.Contains(l, trapCmd) {
-			foundTrap = true
-		}
-		// Original command must be gone from non-passthrough lines
-		if strings.Contains(l, "ls -la") && !strings.Contains(l, "finish_reason") {
-			t.Errorf("original command still present in output line: %q", l)
-		}
-	}
-	if !foundTrap {
-		t.Errorf("trap command %q not found in output: %v", trapCmd, allOutput)
-	}
-}
 
 func TestOAIStreamInterceptor_MultiChunkArgs_Accumulated(t *testing.T) {
 	oi := newTestOAIInterceptor(t)
@@ -296,25 +256,15 @@ func TestOAIStreamInterceptor_MultipleConcurrentToolCalls(t *testing.T) {
 		`data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	}
 
-	for _, line := range lines[:4] {
+	// All lines pass through immediately in passthrough mode
+	for _, line := range lines {
 		out, err := oi.ProcessLine(line)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(out) != 0 {
-			t.Errorf("tool call lines should be buffered: %q => %v", line, out)
+		if len(out) != 1 || out[0] != line {
+			t.Errorf("line should pass through immediately: %q => %v", line, out)
 		}
-	}
-
-	out, err := oi.ProcessLine(lines[4])
-	if err != nil {
-		t.Fatalf("unexpected error on finish: %v", err)
-	}
-
-	// Should have flushed both tool calls plus the finish_reason line
-	// 2 name lines + 2 arg lines + 1 finish = at least 5 lines
-	if len(out) < 5 {
-		t.Errorf("expected at least 5 output lines for 2 buffered tool calls, got %d: %v", len(out), out)
 	}
 }
 

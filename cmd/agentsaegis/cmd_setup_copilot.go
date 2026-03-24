@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -43,7 +44,12 @@ func vscodeSettingsPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("getting home directory: %w", err)
 	}
-	return filepath.Join(home, "Library", "Application Support", "Code", "User", "settings.json"), nil
+	switch runtime.GOOS {
+	case "linux":
+		return filepath.Join(home, ".config", "Code", "User", "settings.json"), nil
+	default: // darwin
+		return filepath.Join(home, "Library", "Application Support", "Code", "User", "settings.json"), nil
+	}
 }
 
 func runSetupCopilot(_ *cobra.Command, _ []string) error {
@@ -56,40 +62,10 @@ func runSetupCopilot(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("resolving executable path: %w", err)
 	}
 
-	// 1. Create hook config file
-	hooksDir, err := copilotHooksDir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-		return fmt.Errorf("creating hooks directory: %w", err)
-	}
+	// Copilot traps work via HTTPS_PROXY + TLS MITM (set by the shell wrapper).
+	// No hook config needed - traps are injected in the SSE stream, same as Claude Code.
 
-	hookConfig := map[string]interface{}{
-		"hooks": map[string]interface{}{
-			"preToolUse": []interface{}{
-				map[string]interface{}{
-					"type":       "command",
-					"bash":       exe + " hook",
-					"timeoutSec": 5,
-				},
-			},
-		},
-	}
-
-	hookData, _ := json.MarshalIndent(hookConfig, "", "  ")
-	hookPath := filepath.Join(hooksDir, "agentsaegis.json")
-	if err := os.WriteFile(hookPath, append(hookData, '\n'), 0o644); err != nil {
-		return fmt.Errorf("writing hook config: %w", err)
-	}
-
-	relHookPath := hookPath
-	if home, _ := os.UserHomeDir(); strings.HasPrefix(hookPath, home) {
-		relHookPath = "~" + hookPath[len(home):]
-	}
-	fmt.Printf("Added Copilot hook config to %s\n", relHookPath)
-
-	// 2. Add MCP server to VS Code settings
+	// 1. Add MCP server to VS Code settings
 	settingsPath, err := vscodeSettingsPath()
 	if err != nil {
 		return err

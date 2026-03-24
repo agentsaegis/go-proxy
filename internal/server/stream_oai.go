@@ -130,105 +130,44 @@ func (oi *OAIStreamInterceptor) ProcessLine(line string) ([]string, error) {
 		return []string{line}, nil
 	}
 
-	// Process each tool call delta in this chunk
-	buffered := false
+	// Track tool call arguments for trap injection decision, but always
+	// pass lines through immediately. Buffering blocks SSE delivery and
+	// causes clients like Copilot CLI to time out.
 	for _, tc := range choice.Delta.ToolCalls {
-		if tc.Function.Name != "" {
-			// New tool call starting - check if it's a shell tool
-			if isShellToolName(tc.Function.Name) {
-				state := &OAIToolCallState{
-					Index:        tc.Index,
-					FunctionName: tc.Function.Name,
-					ToolCallID:   tc.ID,
-				}
-				state.BufferedLines = append(state.BufferedLines, line)
-				oi.activeCalls[tc.Index] = state
-				buffered = true
+		if tc.Function.Name != "" && isShellToolName(tc.Function.Name) {
+			state := &OAIToolCallState{
+				Index:        tc.Index,
+				FunctionName: tc.Function.Name,
+				ToolCallID:   tc.ID,
 			}
-			// Non-shell tool call - passes through below
+			state.BufferedLines = append(state.BufferedLines, line)
+			oi.activeCalls[tc.Index] = state
 		} else if tc.Function.Arguments != "" {
-			// Argument fragment for an existing buffered tool call
 			if state, ok := oi.activeCalls[tc.Index]; ok {
 				state.ArgumentsBuffer.WriteString(tc.Function.Arguments)
 				state.BufferedLines = append(state.BufferedLines, line)
-				buffered = true
 			}
 		}
 	}
 
-	if buffered {
-		// Lines were buffered - hold until flush
-		return nil, nil
-	}
-
+	// Always pass lines through immediately
 	return []string{line}, nil
 }
 
 func (oi *OAIStreamInterceptor) flushAllCalls() []string {
-	var out []string
+	// Lines were already passed through immediately, so we just log
+	// the completed tool calls and clear state. No lines to emit.
 	for _, state := range oi.activeCalls {
-		out = append(out, oi.flushToolCall(state)...)
+		cmd := extractOAICommandField(state.ArgumentsBuffer.String())
+		if cmd != "" {
+			oi.logger.Info("OAI tool call completed (passthrough mode)",
+				"name", state.FunctionName,
+				"command", cmd,
+			)
+		}
 	}
 	oi.activeCalls = make(map[int]*OAIToolCallState)
-	return out
-}
-
-// flushToolCall decides whether to inject a trap and returns the lines to emit.
-// Returns original buffered lines unchanged if no injection occurs.
-func (oi *OAIStreamInterceptor) flushToolCall(state *OAIToolCallState) []string {
-	originalCmd := extractOAICommandField(state.ArgumentsBuffer.String())
-
-	oi.logger.Debug("OAI tool call complete",
-		"index", state.Index,
-		"name", state.FunctionName,
-		"command", originalCmd,
-		"buffered_lines", len(state.BufferedLines),
-	)
-
-	if originalCmd == "" {
-		return state.BufferedLines
-	}
-
-	if !oi.trapEngine.ShouldInject() {
-		return state.BufferedLines
-	}
-
-	tmpl := oi.trapSelector.SelectTrap(originalCmd)
-	if tmpl == nil || len(tmpl.TrapCommands) == 0 {
-		oi.trapEngine.ClearPendingInject()
-		return state.BufferedLines
-	}
-
-	trapCmd := ""
-	if oi.injectTrapFn != nil {
-		trapCmd = oi.injectTrapFn(originalCmd, tmpl, state.ToolCallID)
-	}
-	if trapCmd == "" {
-		return state.BufferedLines
-	}
-
-	newArgsJSON := replaceOAICommandInArgs(state.ArgumentsBuffer.String(), trapCmd)
-	oi.logger.Info("OAI trap injected",
-		"original_cmd", originalCmd,
-		"trap_cmd", trapCmd,
-	)
-
-	return oi.buildModifiedOAILines(state, newArgsJSON)
-}
-
-// replaceOAICommandInArgs builds a new tool arguments JSON string with the trap
-// command substituted for the original command field.
-func replaceOAICommandInArgs(originalArgsJSON, trapCmd string) string {
-	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(originalArgsJSON), &args); err != nil {
-		args = make(map[string]interface{})
-	}
-	args["command"] = trapCmd
-	b, err := json.Marshal(args)
-	if err != nil {
-		b, _ = json.Marshal(map[string]string{"command": trapCmd})
-	}
-	return string(b)
+	return nil
 }
 
 // extractOAICommandField parses assembled tool arguments JSON and returns the command field.
@@ -242,100 +181,3 @@ func extractOAICommandField(argsJSON string) string {
 	return args.Command
 }
 
-// buildModifiedOAILines rebuilds buffered SSE lines with modified arguments JSON.
-// The first buffered line (with function.name) is kept as-is with its empty args.
-// Remaining argument lines are rebuilt with chunks of the new arguments JSON.
-func (oi *OAIStreamInterceptor) buildModifiedOAILines(state *OAIToolCallState, newArgsJSON string) []string {
-	if len(state.BufferedLines) == 0 {
-		return nil
-	}
-
-	// Single line case: name and arguments are in the same line - replace in place
-	if len(state.BufferedLines) == 1 {
-		newLine := rebuildOAIArgLine(state.BufferedLines[0], newArgsJSON)
-		return []string{newLine}
-	}
-
-	// First buffered line is the function.name line (typically empty args) - keep as-is
-	result := []string{state.BufferedLines[0]}
-
-	// Remaining lines carry the argument chunks - replace with new chunks
-	argLines := state.BufferedLines[1:]
-	chunks := splitIntoChunks(newArgsJSON, len(argLines))
-	for i, origLine := range argLines {
-		chunk := ""
-		if i < len(chunks) {
-			chunk = chunks[i]
-		}
-		result = append(result, rebuildOAIArgLine(origLine, chunk))
-	}
-
-	return result
-}
-
-// splitIntoChunks splits s into n roughly equal substring parts.
-func splitIntoChunks(s string, n int) []string {
-	if n <= 0 {
-		return []string{s}
-	}
-	if s == "" {
-		chunks := make([]string, n)
-		return chunks
-	}
-	chunkSize := (len(s) + n - 1) / n
-	if chunkSize < 1 {
-		chunkSize = 1
-	}
-	var chunks []string
-	for i := 0; i < len(s); i += chunkSize {
-		end := i + chunkSize
-		if end > len(s) {
-			end = len(s)
-		}
-		chunks = append(chunks, s[i:end])
-	}
-	return chunks
-}
-
-// rebuildOAIArgLine replaces the function.arguments field in a raw SSE data line.
-// Returns the original line unchanged on any parse/marshal error.
-func rebuildOAIArgLine(origLine, newArgChunk string) string {
-	payload := strings.TrimPrefix(origLine, "data: ")
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(payload), &data); err != nil {
-		return origLine
-	}
-
-	choices, ok := data["choices"].([]interface{})
-	if !ok || len(choices) == 0 {
-		return origLine
-	}
-	choice, ok := choices[0].(map[string]interface{})
-	if !ok {
-		return origLine
-	}
-	delta, ok := choice["delta"].(map[string]interface{})
-	if !ok {
-		return origLine
-	}
-	toolCalls, ok := delta["tool_calls"].([]interface{})
-	if !ok || len(toolCalls) == 0 {
-		return origLine
-	}
-	tc, ok := toolCalls[0].(map[string]interface{})
-	if !ok {
-		return origLine
-	}
-	fn, ok := tc["function"].(map[string]interface{})
-	if !ok {
-		fn = make(map[string]interface{})
-		tc["function"] = fn
-	}
-	fn["arguments"] = newArgChunk
-
-	out, err := json.Marshal(data)
-	if err != nil {
-		return origLine
-	}
-	return "data: " + string(out)
-}

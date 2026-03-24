@@ -99,10 +99,20 @@ func New(
 	mux.HandleFunc("POST /hooks/inject-trap", s.handleInjectTrap)
 	mux.HandleFunc("GET /__aegis/health", s.handleHealth)
 
+	// Wrap mux to intercept CONNECT requests before the ServeMux,
+	// which does not route CONNECT to pattern handlers.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			s.connectHandler.HandleConnect(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+
 	addr := fmt.Sprintf(":%d", cfg.ProxyPort)
 	s.httpServer = &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -122,10 +132,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodConnect {
-		s.connectHandler.HandleConnect(w, r)
-		return
-	}
 	s.proxyHandler.HandleProxy(w, r)
 }
 

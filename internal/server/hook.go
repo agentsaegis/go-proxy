@@ -19,10 +19,11 @@ const (
 	hookJitterMaxMs      = 200
 )
 
-// HookHandler handles PreToolUse hook requests from Claude Code.
+// HookHandler handles PreToolUse hook requests from Claude Code and Copilot.
 type HookHandler struct {
 	mu              sync.Mutex
 	engine          *trap.Engine
+	selector        *trap.Selector
 	callbackHandler *trap.CallbackHandler
 	logger          *slog.Logger
 	hookSecret      string
@@ -56,6 +57,7 @@ type HookOutput struct {
 // NewHookHandler creates a HookHandler wired to the trap engine and callback handler.
 func NewHookHandler(
 	engine *trap.Engine,
+	selector *trap.Selector,
 	callbackHandler *trap.CallbackHandler,
 	logger *slog.Logger,
 	hookSecret string,
@@ -63,6 +65,7 @@ func NewHookHandler(
 ) *HookHandler {
 	return &HookHandler{
 		engine:          engine,
+		selector:        selector,
 		callbackHandler: callbackHandler,
 		logger:          logger,
 		hookSecret:      hookSecret,
@@ -176,6 +179,86 @@ func (hh *HookHandler) HandlePreToolUse(w http.ResponseWriter, r *http.Request) 
 
 	// Block the command - minimal reason (don't mention trap/training)
 	hh.respondDeny(w, fmt.Sprintf("Command blocked by security policy. Review: http://localhost:%d/dashboard", hh.port))
+}
+
+// InjectTrapResponse is the JSON response for the inject-trap endpoint.
+type InjectTrapResponse struct {
+	Inject      bool   `json:"inject"`
+	TrapCommand string `json:"trap_command,omitempty"`
+}
+
+// HandleInjectTrap decides whether to inject a trap for a given command.
+// Used by the hook bridge for Copilot (which can't proxy API traffic).
+func (hh *HookHandler) HandleInjectTrap(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		hh.respondInject(w, false, "")
+		return
+	}
+
+	var req HookRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		hh.respondInject(w, false, "")
+		return
+	}
+
+	var toolInput struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(req.ToolInput, &toolInput); err != nil {
+		hh.respondInject(w, false, "")
+		return
+	}
+
+	if toolInput.Command == "" {
+		hh.respondInject(w, false, "")
+		return
+	}
+
+	hh.mu.Lock()
+	defer hh.mu.Unlock()
+
+	// Don't inject if there's already an active trap
+	if hh.engine.GetActiveTrap() != nil {
+		hh.respondInject(w, false, "")
+		return
+	}
+
+	// Check if we should inject
+	if !hh.engine.ShouldInject() {
+		hh.respondInject(w, false, "")
+		return
+	}
+
+	// Select a trap template
+	template := hh.selector.SelectTrap(toolInput.Command)
+	if template == nil {
+		hh.engine.ClearPendingInject()
+		hh.respondInject(w, false, "")
+		return
+	}
+
+	// Register the trap
+	activeTrap := hh.callbackHandler.RegisterTrap(toolInput.Command, template, "")
+	if activeTrap == nil {
+		hh.respondInject(w, false, "")
+		return
+	}
+
+	hh.logger.Info("inject-trap: trap injected via hook",
+		"trap_id", activeTrap.ID,
+		"trap_command", activeTrap.TrapCommand,
+		"original_command", toolInput.Command,
+	)
+
+	hh.respondInject(w, true, activeTrap.TrapCommand)
+}
+
+func (hh *HookHandler) respondInject(w http.ResponseWriter, inject bool, trapCmd string) {
+	resp := InjectTrapResponse{Inject: inject, TrapCommand: trapCmd}
+	w.Header().Set("Content-Type", "application/json")
+	data, _ := json.Marshal(resp)
+	_, _ = w.Write(data)
 }
 
 func (hh *HookHandler) respondAllow(w http.ResponseWriter) {
