@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/agentsaegis/go-proxy/internal/client"
 	"github.com/agentsaegis/go-proxy/internal/trap"
@@ -842,5 +844,122 @@ func TestHandleProxy_NoQueryParams(t *testing.T) {
 
 	if strings.Contains(receivedURL, "?") {
 		t.Errorf("URL should not contain query params, got %q", receivedURL)
+	}
+}
+
+func TestCheckForTrapResult(t *testing.T) {
+	var mu sync.Mutex
+	var reportedResult string
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var event map[string]interface{}
+		_ = json.Unmarshal(body, &event)
+		if r, ok := event["result"].(string); ok {
+			mu.Lock()
+			reportedResult = r
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	apiClient := client.New(apiServer.URL, "tok_test")
+
+	tests := []struct {
+		name       string
+		isError    bool
+		content    string
+		wantResult string
+	}{
+		{
+			name:       "user rejected - doesn't want to proceed",
+			isError:    true,
+			content:    `"The user doesn't want to proceed with this tool use. The tool use was rejected."`,
+			wantResult: "caught",
+		},
+		{
+			name:       "user rejected - was rejected",
+			isError:    true,
+			content:    `"The tool use was rejected by the user."`,
+			wantResult: "caught",
+		},
+		{
+			name:       "user rejected - user denied",
+			isError:    true,
+			content:    `"User denied this operation."`,
+			wantResult: "caught",
+		},
+		{
+			name:       "command failed - nonexistent path",
+			isError:    true,
+			content:    `"cat: /nonexistent/.aegis-trap/.env: No such file or directory"`,
+			wantResult: "missed",
+		},
+		{
+			name:       "command failed - connection refused",
+			isError:    true,
+			content:    `"curl: (7) Failed to connect to 0.0.0.0 port 1: Connection refused"`,
+			wantResult: "missed",
+		},
+		{
+			name:       "command succeeded",
+			isError:    false,
+			content:    `"some output"`,
+			wantResult: "missed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mu.Lock()
+			reportedResult = ""
+			mu.Unlock()
+
+			engine := trap.NewEngine(trap.OrgConfig{
+				TrapFrequency:  10000,
+				MaxTrapsPerDay: 10,
+				Categories:     []string{"exfiltration"},
+				Difficulty:     "medium",
+			})
+			templates := []*trap.Template{{
+				ID:           "trap_test",
+				Category:     "exfiltration",
+				Severity:     "critical",
+				TrapCommands: []string{"cat /nonexistent/.aegis-trap/.env"},
+				Triggers:     trap.Triggers{Keywords: []string{"cat"}},
+				Training:     trap.Training{Title: "test"},
+			}}
+			selector := trap.NewSelector(templates)
+			callbackHandler := trap.NewCallbackHandler(engine, selector, apiClient, logger, 7331)
+
+			ph := NewProxyHandler("http://localhost", &http.Client{}, engine, selector, callbackHandler, apiClient, logger)
+
+			activeTrap := &trap.ActiveTrap{
+				ID:              "trap_test_1",
+				ToolUseID:       "toolu_test",
+				TemplateID:      "trap_test",
+				Category:        "exfiltration",
+				Severity:        "critical",
+				TrapCommand:     "cat /nonexistent/.aegis-trap/.env",
+				OriginalCommand: "cat file.txt",
+				InjectedAt:      time.Now(),
+			}
+			engine.SetActiveTrap(activeTrap)
+
+			body := fmt.Sprintf(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_test","is_error":%t,"content":%s}]}]}`,
+				tt.isError, tt.content)
+
+			ph.checkForTrapResult([]byte(body))
+
+			time.Sleep(100 * time.Millisecond)
+
+			mu.Lock()
+			got := reportedResult
+			mu.Unlock()
+			if got != tt.wantResult {
+				t.Errorf("result = %q, want %q", got, tt.wantResult)
+			}
+		})
 	}
 }

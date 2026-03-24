@@ -422,20 +422,22 @@ func (ph *ProxyHandler) checkForTrapResult(body []byte) {
 				continue
 			}
 
-			// Found the tool_result for our trap
+			// Found the tool_result for our trap.
+			// Check content for rejection indicators to determine if the user
+			// denied the command (caught) vs approved it and it failed (missed).
+			// Trap commands target nonexistent paths so they always fail with
+			// is_error: true - we can't use is_error alone to distinguish.
 			result := "missed"
-			if toolResult.IsError {
+			contentStr := string(toolResult.Content)
+			lower := strings.ToLower(contentStr)
+			if strings.Contains(lower, "user denied") ||
+				strings.Contains(lower, "user rejected") ||
+				strings.Contains(lower, "was rejected") ||
+				strings.Contains(lower, "doesn't want to proceed") ||
+				strings.Contains(lower, "does not want to proceed") ||
+				strings.Contains(lower, "operation not permitted") ||
+				strings.Contains(lower, "the user denied this operation") {
 				result = "caught"
-			} else {
-				// Check content for rejection indicators
-				contentStr := string(toolResult.Content)
-				lower := strings.ToLower(contentStr)
-				if strings.Contains(lower, "user denied") ||
-					strings.Contains(lower, "user rejected") ||
-					strings.Contains(lower, "operation not permitted") ||
-					strings.Contains(lower, "the user denied this operation") {
-					result = "caught"
-				}
 			}
 
 			ph.logger.Info("trap result detected from request body",
