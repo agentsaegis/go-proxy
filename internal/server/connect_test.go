@@ -401,9 +401,10 @@ func TestConnectHandler_JSONPassThrough(t *testing.T) {
 	}
 }
 
-// TestConnectHandler_ForwardSSEResponse tests forwardSSEResponse directly
-// using a net.Pipe to avoid full end-to-end complexity.
-func TestConnectHandler_ForwardSSEResponse(t *testing.T) {
+// TestConnectHandler_ForwardSSEResponse_ChunkedEncoding verifies that
+// forwardSSEResponse uses chunked Transfer-Encoding so the HTTP client can
+// detect end-of-body without relying on connection close.
+func TestConnectHandler_ForwardSSEResponse_ChunkedEncoding(t *testing.T) {
 	ch, _ := setupConnectHandler(t)
 
 	sseLines := []string{
@@ -432,16 +433,183 @@ func TestConnectHandler_ForwardSSEResponse(t *testing.T) {
 		serverConn.Close()
 	}()
 
-	var buf strings.Builder
-	_, _ = io.Copy(&buf, clientConn)
+	// Parse the response as a proper HTTP response - this validates the
+	// chunked encoding is correct (Go's http.ReadResponse de-chunks automatically).
+	reader := bufio.NewReader(clientConn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("http.ReadResponse failed: %v", err)
+	}
+	defer resp.Body.Close()
 
-	if err := <-errCh; err != nil {
-		t.Logf("forwardSSEResponse returned: %v (may be expected on pipe close)", err)
+	// Verify Transfer-Encoding: chunked header is present
+	if te := resp.TransferEncoding; len(te) == 0 || te[0] != "chunked" {
+		t.Errorf("TransferEncoding = %v, want [chunked]", te)
 	}
 
-	output := buf.String()
-	// SSE lines should be forwarded (passthrough mode - no injection yet)
-	if !strings.Contains(output, "text/event-stream") && !strings.Contains(output, "chatcmpl") {
-		t.Errorf("expected SSE response in output.\nOutput: %s", output)
+	// Verify Content-Type preserved
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+
+	// Read the full body - this validates chunked decoding works end-to-end
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading response body: %v", err)
+	}
+
+	if fwdErr := <-errCh; fwdErr != nil {
+		t.Logf("forwardSSEResponse returned: %v (may be expected on pipe close)", fwdErr)
+	}
+
+	bodyStr := string(body)
+
+	// Verify SSE content came through
+	if !strings.Contains(bodyStr, "data: [DONE]") {
+		t.Errorf("body missing data: [DONE] sentinel.\nBody: %s", bodyStr)
+	}
+}
+
+// TestConnectHandler_ForwardSSEResponse_BodyNotTruncated verifies that all SSE
+// lines are delivered through the chunked response without any being lost.
+func TestConnectHandler_ForwardSSEResponse_BodyNotTruncated(t *testing.T) {
+	ch, _ := setupConnectHandler(t)
+
+	// Use non-tool-call lines so interceptor passes them through unchanged
+	sseLines := []string{
+		`data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}`,
+		``,
+		`data: {"id":"x","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}`,
+		``,
+		`data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		``,
+		`data: [DONE]`,
+	}
+	sseBody := strings.Join(sseLines, "\n") + "\n"
+
+	mockResp := &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+		Body: io.NopCloser(strings.NewReader(sseBody)),
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ch.forwardSSEResponse(serverConn, mockResp)
+		serverConn.Close()
+	}()
+
+	reader := bufio.NewReader(clientConn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("http.ReadResponse failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+
+	<-errCh
+
+	bodyStr := string(body)
+
+	// Every original SSE line (including blank separators) should appear
+	for _, line := range sseLines {
+		if line == "" {
+			continue // blank lines are SSE separators, hard to assert individually
+		}
+		if !strings.Contains(bodyStr, line) {
+			t.Errorf("body missing line %q.\nFull body:\n%s", line, bodyStr)
+		}
+	}
+}
+
+// TestConnectHandler_SSEInterception_ConnectionStaysOpen verifies that after an
+// intercepted SSE stream completes, the MITM tunnel connection stays open and
+// can serve a subsequent request (no premature close).
+func TestConnectHandler_SSEInterception_ConnectionStaysOpen(t *testing.T) {
+	ch, caManager := setupConnectHandler(t)
+
+	requestCount := 0
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if strings.Contains(r.URL.Path, "chat/completions") {
+			// First request: SSE stream
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n")
+			fmt.Fprint(w, "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n")
+			fmt.Fprint(w, "data: [DONE]\n")
+			return
+		}
+		// Second request: JSON
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamHost := upstream.Listener.Addr().String()
+	ch.upstreamHTTPClient = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test only
+			DialTLSContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return tls.Dial("tcp", upstreamHost, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // test only
+			},
+		},
+	}
+
+	srv := startProxyServer(t, ch)
+	rawConn := sendCONNECT(t, srv.Listener.Addr().String(), "api.github.com:443")
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(caManager.caCert)
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		ServerName: "api.github.com",
+		RootCAs:    certPool,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	reader := bufio.NewReader(tlsConn)
+
+	// Request 1: SSE stream via /chat/completions
+	fmt.Fprintf(tlsConn, "GET /v1/chat/completions HTTP/1.1\r\nHost: api.github.com\r\n\r\n")
+	resp1, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read SSE response: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+
+	if !strings.Contains(string(body1), "[DONE]") {
+		t.Fatalf("SSE body missing [DONE].\nBody: %s", string(body1))
+	}
+
+	// Request 2: JSON on the SAME connection (proves connection stayed open)
+	fmt.Fprintf(tlsConn, "GET /v1/responses HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
+	resp2, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read second response on same connection: %v (connection was closed prematurely)", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+
+	if string(body2) != `{"ok":true}` {
+		t.Errorf("second response body = %q, want {\"ok\":true}", string(body2))
+	}
+
+	if requestCount != 2 {
+		t.Errorf("upstream received %d requests, want 2", requestCount)
 	}
 }
