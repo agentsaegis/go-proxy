@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-AgentsAegis is an open-source security awareness proxy for AI coding tools (currently Claude Code). It sits between Claude Code and the Anthropic API on `localhost:7331`, intercepting API traffic. It occasionally replaces legitimate bash commands in AI responses with realistic but inherently harmless "trap" commands (targeting nonexistent paths, fake remotes, reserved addresses). If a developer approves a trap without noticing, a Claude Code `PreToolUse` hook blocks execution and displays a training message explaining the risk. Results are optionally reported to the AgentsAegis dashboard API for team-level tracking and analytics.
+AgentsAegis is an open-source security awareness proxy for AI coding tools (Claude Code CLI, with Copilot CLI support in development). It sits between the AI tool and its API on `localhost:7331`, intercepting API traffic. It occasionally replaces legitimate bash commands in AI responses with realistic but inherently harmless "trap" commands (targeting nonexistent paths, fake remotes, reserved addresses). If a developer approves a trap without noticing, the proxy detects this via the next API request's tool_result and reports it. Results are optionally reported to the AgentsAegis dashboard API for team-level tracking and analytics.
 
 ## Tech Stack
 
@@ -10,7 +10,7 @@ AgentsAegis is an open-source security awareness proxy for AI coding tools (curr
 - **CLI framework:** cobra (`github.com/spf13/cobra`)
 - **Config:** viper (`github.com/spf13/viper`) - reads YAML config + env vars
 - **YAML parsing:** `gopkg.in/yaml.v3` - for trap template files
-- **Linting:** golangci-lint (errcheck, gosimple, govet, ineffassign, staticcheck, unused)
+- **Linting:** golangci-lint v2 (errcheck, govet, ineffassign, staticcheck, unused)
 - **CI:** GitHub Actions (lint, unit tests, e2e tests, codecov)
 - **Release:** GoReleaser v2 - builds darwin/linux amd64/arm64, publishes to GitHub Releases + Homebrew tap
 - **Coverage:** Codecov with 90% target
@@ -34,14 +34,15 @@ Claude Code  -->  AgentsAegis Proxy (localhost:7331)  -->  Anthropic API (api.an
 7. Response (possibly modified) streams back to Claude Code
 
 **Trap resolution flow:**
-1. Hook path: Claude Code's `PreToolUse` hook POSTs to `POST /hooks/pre-tool-use` - `HookHandler` matches command against active trap, blocks if matched
-2. Request-body path: Next API request's `tool_result` block is checked for the trap's `tool_use_id` - detects approval/rejection
+1. Request-body path (primary): Next API request's `tool_result` block is checked for the trap's `tool_use_id`. Content is scanned for rejection phrases ("was rejected", "doesn't want to proceed", "user denied") to distinguish user rejection (caught) from command failure (missed). The `is_error` flag is NOT used because trap commands always fail with `is_error: true`.
+2. Hook path (secondary): Claude Code's `PreToolUse` hook POSTs to `POST /hooks/pre-tool-use` - `HookHandler` matches command against active trap, blocks if matched. Note: this fires before the user confirmation dialog, so it's less reliable.
 3. `CallbackHandler.ResolveTrap()` reports result to dashboard API, displays training message if missed, cleans up
 
-**Three HTTP endpoints:**
+**HTTP endpoints:**
 - `GET /__aegis/health` - health check (used by shell wrapper to detect if proxy is running)
-- `POST /hooks/pre-tool-use` - Claude Code PreToolUse hook endpoint
-- `/ (catch-all)` - reverse proxy to Anthropic API
+- `POST /hooks/pre-tool-use` - PreToolUse hook endpoint (matches commands against active traps)
+- `POST /hooks/inject-trap` - hook-based trap injection for non-proxied clients
+- `/ (catch-all)` - reverse proxy to Anthropic API; also handles CONNECT for TLS MITM tunnels
 
 ## Directory Map
 
@@ -109,65 +110,63 @@ internal/
 e2e/
   e2e_test.go            # End-to-end tests (build tag: e2e) - mock Anthropic + dashboard servers
 
+scripts/
+  test-interactive.sh    # Launch interactive Docker container for manual testing
+  qa-docker-entrypoint.sh # Container entrypoint (proxy start, CA trust, wrapper setup)
+  qa-docker-claude.sh    # Automated Claude Code QA tests
+  qa-docker-copilot.sh   # Automated Copilot CLI QA tests
+
 install.sh               # Curl-pipe installer script - detects OS/arch, downloads release, verifies checksum
+Dockerfile.qa            # Docker image with Claude Code + Copilot CLI for testing
 
 bin/                     # Build output directory (gitignored)
 
 .github/
   workflows/
-    ci.yml               # CI: lint + unit tests + e2e tests on push/PR to main
+    ci.yml               # CI: lint (golangci-lint v2) + unit tests + e2e tests on push/PR to main
     release.yml          # Release: CI then GoReleaser on tag push (v*)
   dependabot.yml         # Weekly gomod + GitHub Actions dependency updates
-
-docs/                    # Documentation (untracked, not in git yet)
 ```
 
 ## Key Flows
 
-### 1. Trap injection via SSE stream (most common path)
+### 1. Trap injection via SSE stream (primary path)
 
-1. Claude Code POST to `/ (any path)` - hits `ProxyHandler.HandleProxy()` in `internal/server/handler.go`
-2. Request body checked for trap results via `checkForTrapResult()` (handler.go:376)
-3. Forwarded to Anthropic API via `buildUpstreamRequestFromBody()` (handler.go:101)
-4. SSE response handled by `handleSSEResponse()` (handler.go:132)
-5. Each SSE event goes through `StreamInterceptor.ProcessEvent()` (stream.go:65)
-6. `content_block_start` with type=tool_use, name=bash triggers buffering (stream.go:79)
-7. `content_block_delta` events accumulate partial JSON (stream.go:114)
-8. `content_block_stop` triggers injection decision (stream.go:141):
-   - `Engine.ShouldInject()` (engine.go:67) checks frequency/jitter/cooldown
-   - `Selector.SelectTrap()` (selector.go:26) picks template by keyword match
-   - `buildTrapResponse()` (stream.go:195) calls `injectTrapFn` which calls `CallbackHandler.RegisterTrap()` (callback.go:40)
-   - `RegisterTrap` writes trap file via `WriteTrapFile()` (trapfile.go:35)
-   - Modified SSE deltas emitted via `buildModifiedDeltas()` (stream.go:251)
+1. Claude Code POSTs to `/ (any path)` - `ProxyHandler.HandleProxy()` in `handler.go`
+2. Request body checked for trap results via `checkForTrapResult()`
+3. Forwarded to Anthropic API
+4. SSE response piped through `StreamInterceptor.ProcessEvent()` in `stream.go`
+5. `content_block_start` with type=tool_use, name=bash triggers buffering
+6. `content_block_delta` events accumulate partial JSON
+7. `content_block_stop` triggers injection decision:
+   - `Engine.ShouldInject()` checks frequency/jitter/cooldown
+   - `Selector.SelectTrap()` picks template by keyword match
+   - `CallbackHandler.RegisterTrap()` stores trap + writes trap file to disk
+   - Modified SSE deltas emitted back to Claude Code
 
-### 2. Trap detection via PreToolUse hook
+### 2. Trap detection via request body (primary detection)
 
-1. Claude Code calls `POST /hooks/pre-tool-use` - hits `HookHandler.HandlePreToolUse()` (hook.go:71)
-2. Validates optional `X-Hook-Secret` header
-3. Parses `HookRequest` JSON: session_id, tool_name, tool_input.command
-4. Only processes `PreToolUse` + `Bash` tool
-5. Checks cooldown, then gets active trap from engine
-6. `MatchCommand()` (matcher.go:18) compares hook command to trap command
-7. If matched: `CallbackHandler.ResolveTrap()` (callback.go:83) reports "missed", activates cooldown, responds with deny
-8. If not matched: responds with allow (empty 200)
+1. Next Claude Code API request hits `HandleProxy()`
+2. `checkForTrapResult()` scans messages for `tool_result` matching active trap's `tool_use_id`
+3. Content checked for rejection phrases ("was rejected", "doesn't want to proceed", "user denied") - result = "caught"
+4. No rejection phrases found - result = "missed" (command ran but failed on nonexistent targets)
+5. `CallbackHandler.ResolveTrap()` reports to dashboard
 
-### 3. Trap detection via request body (fallback)
+### 3. Trap detection via PreToolUse hook (secondary)
 
-1. Next Claude Code API request hits `HandleProxy()` (handler.go:56)
-2. `checkForTrapResult()` (handler.go:376) scans messages for `tool_result` matching active trap's `tool_use_id`
-3. If `is_error: true` or content contains rejection phrases - result = "caught"
-4. Otherwise result = "missed"
-5. Calls `CallbackHandler.ResolveTrap()`
+1. Claude Code calls `POST /hooks/pre-tool-use` - `HookHandler.HandlePreToolUse()` in `hook.go`
+2. Validates optional `X-Hook-Secret` header, parses command from request
+3. `MatchCommand()` compares against active trap
+4. If matched: resolves as "missed", responds with deny
+5. Note: fires before user confirmation dialog, so not reliable as primary detection
 
 ### 4. Shell wrapper setup
 
-1. `agentsaegis setup-shell` runs `runSetupShell()` (cmd_setup_shell.go:129)
-2. `shellProfiles()` detects shell from `$SHELL` env var
-3. Generates `claude()` wrapper function that:
-   - Checks health endpoint `curl http://localhost:PORT/__aegis/health`
-   - If proxy running: sets `ANTHROPIC_BASE_URL=http://localhost:PORT` then runs `command claude`
-   - If proxy down: runs `command claude` directly (transparent fallback)
-4. Removes any existing marker block or legacy export, appends new wrapper
+1. `agentsaegis setup-shell` detects shell from `$SHELL`
+2. Generates `claude()` and `copilot()` wrapper functions:
+   - `claude()`: sets `ANTHROPIC_BASE_URL=http://localhost:PORT`, auto-starts proxy
+   - `copilot()`: sets `HTTPS_PROXY=http://localhost:PORT`, auto-starts proxy
+   - Both fail open - if proxy can't start, run command directly
 
 ## Data Models
 
@@ -259,6 +258,21 @@ make lint
 # CI also runs golangci-lint
 ```
 
+### Docker QA (interactive testing)
+```bash
+# Starts container with proxy in super-debug mode, CA trusted, shell wrappers configured
+./scripts/test-interactive.sh
+
+# Inside container:
+claude          # Test Claude Code traps (requires browser auth)
+copilot         # Test Copilot traps (use /login for device auth)
+
+# Connect to local dashboard:
+export AEGIS_API_TOKEN=aa_dev_...
+export AEGIS_DASHBOARD_URL=http://host.docker.internal:3763
+./scripts/test-interactive.sh
+```
+
 ### Build for production (cross-platform)
 ```bash
 goreleaser release --snapshot --clean
@@ -338,7 +352,11 @@ To write a new test:
 
 - **Config file location is hardcoded** to `~/.agentsaegis/config.yaml`. The `AEGIS_` env prefix overrides config values but there's no CLI flag to specify a different config path.
 
-- **The shell wrapper uses a `claude()` function**, not an alias or env export. This means the proxy is only used when running `claude` - other tools using the Anthropic API won't be proxied unless they also use `ANTHROPIC_BASE_URL`.
+- **SSE panic recovery.** The SSE interceptor runs inside `processSSEStream()` with `defer recover()`. If the interceptor panics, remaining upstream data is passed through unmodified via `drainSSEPassthrough()`. The proxy never crashes from a bad trap injection.
+
+- **The shell wrapper uses `claude()` and `copilot()` functions**, not aliases or env exports. `claude()` sets `ANTHROPIC_BASE_URL`, `copilot()` sets `HTTPS_PROXY`. Other tools using these APIs won't be proxied unless they also use the relevant env var.
+
+- **Trap result detection checks content, not is_error.** `checkForTrapResult()` scans the tool_result content for rejection phrases ("was rejected", "doesn't want to proceed"). It does NOT use the `is_error` boolean because trap commands always fail with `is_error: true` (nonexistent targets). This was fixed in v0.5.1.
 
 - **`--super-debug` mode** injects a trap on every single bash command and auto-clears stale traps. It also disables cooldown and jitter on the hook handler. Use it for testing trap injection/detection mechanics.
 
