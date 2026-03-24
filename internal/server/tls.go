@@ -198,6 +198,12 @@ func (m *CAManager) GetTLSConfig(hostname string) (*tls.Config, error) {
 	return &tls.Config{
 		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS12,
+		// Force HTTP/1.1 only: prevent ALPN from advertising h2.
+		// Clients like Copilot CLI will negotiate HTTP/2 if offered,
+		// but our MITM tunnel uses http.ReadRequest() which only
+		// handles HTTP/1.1. Without this, the second request on a
+		// multiplexed HTTP/2 connection causes a GOAWAY error.
+		NextProtos: []string{"http/1.1"},
 	}, nil
 }
 

@@ -22,13 +22,6 @@ import (
 // should stop reading further requests on this connection.
 var errSSEPassthrough = fmt.Errorf("SSE passthrough active")
 
-// errSSEIntercepted is returned by forwardRequest after an intercepted SSE
-// stream (e.g. /chat/completions) has been fully written. The response was
-// sent with Connection: close because we strip Transfer-Encoding and
-// Content-Length for line-by-line trap injection, so the client relies on
-// connection close to detect end-of-body (RFC 7230 §3.3.3).
-var errSSEIntercepted = fmt.Errorf("intercepted SSE stream completed")
-
 var mitmHosts = map[string]bool{
 	"api.github.com":                    true,
 	"api.individual.githubcopilot.com":  true,
@@ -167,12 +160,6 @@ func (ch *ConnectHandler) handleMITMTunnel(conn net.Conn, hostname string) {
 					}
 				}
 			}
-			if fwdErr == errSSEIntercepted {
-				// Intercepted SSE stream was fully written with Connection: close.
-				// Close the connection so the client sees EOF and knows the body ended.
-				ch.logger.Debug("intercepted SSE stream completed, closing connection", "hostname", hostname)
-				return
-			}
 			ch.logger.Debug("forwarding tunneled request failed", "hostname", hostname, "error", fwdErr)
 			return
 		}
@@ -231,10 +218,7 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 		strings.Contains(req.RequestURI, "/chat/completions")
 	if isChatSSE {
 		ch.logger.Info("MITM SSE stream detected, intercepting", "url", upstreamURL)
-		if err := ch.forwardSSEResponse(conn, resp); err != nil {
-			return fmt.Errorf("forwarding SSE response: %w", err)
-		}
-		return errSSEIntercepted
+		return ch.forwardSSEResponse(conn, resp)
 	}
 
 	// For non-intercepted SSE streams (like /mcp/readonly), write headers
@@ -269,26 +253,26 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 }
 
 // forwardSSEResponse writes the SSE response headers to the tunnel connection,
-// then pipes the body through the OAI stream interceptor line-by-line.
+// then pipes the body through the OAI stream interceptor line-by-line using
+// chunked transfer encoding so the client knows when the body ends.
 func (ch *ConnectHandler) forwardSSEResponse(conn net.Conn, resp *http.Response) error {
 	writer := bufio.NewWriter(conn)
 
 	// Write HTTP response status and headers.
-	// Remove Transfer-Encoding and Content-Length since we re-frame the body
-	// line-by-line for trap injection (no longer chunked or fixed-length).
-	// Add Connection: close so the client knows end-of-body is signalled by
-	// connection close (RFC 7230 §3.3.3).
+	// Replace Transfer-Encoding/Content-Length with chunked encoding so the
+	// client can detect end-of-body via the zero-length terminating chunk,
+	// without requiring a connection close.
 	fmt.Fprintf(writer, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
 	for key, values := range resp.Header {
 		lower := strings.ToLower(key)
-		if lower == "transfer-encoding" || lower == "content-length" || lower == "connection" {
+		if lower == "transfer-encoding" || lower == "content-length" {
 			continue
 		}
 		for _, v := range values {
 			fmt.Fprintf(writer, "%s: %s\r\n", key, v)
 		}
 	}
-	fmt.Fprintf(writer, "Connection: close\r\n")
+	fmt.Fprintf(writer, "Transfer-Encoding: chunked\r\n")
 	fmt.Fprintf(writer, "\r\n")
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("flushing SSE response headers: %w", err)
@@ -321,13 +305,20 @@ func (ch *ConnectHandler) forwardSSEResponse(conn net.Conn, resp *http.Response)
 			ch.logger.Debug("OAI SSE line", "n", lineCount, "in_len", len(line), "out_count", len(outputLines), "preview", preview)
 		}
 		for _, outLine := range outputLines {
-			fmt.Fprintln(writer, outLine)
+			chunk := outLine + "\n"
+			fmt.Fprintf(writer, "%x\r\n%s\r\n", len(chunk), chunk)
 		}
 		if flushErr := writer.Flush(); flushErr != nil {
 			return fmt.Errorf("flushing SSE output: %w", flushErr)
 		}
 	}
 	ch.logger.Debug("OAI SSE stream ended", "total_lines", lineCount, "scan_err", scanner.Err())
+
+	// Write the terminating zero-length chunk to signal end of body
+	fmt.Fprintf(writer, "0\r\n\r\n")
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flushing SSE terminating chunk: %w", err)
+	}
 
 	return scanner.Err()
 }

@@ -188,4 +188,10 @@ func TestCAManager_GetTLSConfig(t *testing.T) {
 	if cfg.MinVersion != tls.VersionTLS12 {
 		t.Errorf("MinVersion = %v, want TLS 1.2", cfg.MinVersion)
 	}
+	// Must force HTTP/1.1 only to prevent HTTP/2 ALPN negotiation.
+	// Without this, clients like Copilot CLI negotiate HTTP/2 over the
+	// MITM connection, but our tunnel uses http.ReadRequest (HTTP/1.1 only).
+	if len(cfg.NextProtos) != 1 || cfg.NextProtos[0] != "http/1.1" {
+		t.Errorf("NextProtos = %v, want [http/1.1]", cfg.NextProtos)
+	}
 }
