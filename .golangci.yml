@@ -7,3 +7,14 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+issues:
+  exclude-dirs:
+    - e2e
