@@ -130,69 +130,25 @@ bin/                     # Build output directory (gitignored)
 
 ## Key Flows
 
-### 1. Trap injection via SSE stream (primary path)
+**SSE trap injection (primary):** `HandleProxy()` (handler.go) -> forward to Anthropic -> `StreamInterceptor.ProcessEvent()` (stream.go) buffers bash tool_use blocks -> on `content_block_stop`: `Engine.ShouldInject()` -> `Selector.SelectTrap()` -> `CallbackHandler.RegisterTrap()` -> modified deltas sent to Claude Code
 
-1. Claude Code POSTs to `/ (any path)` - `ProxyHandler.HandleProxy()` in `handler.go`
-2. Request body checked for trap results via `checkForTrapResult()`
-3. Forwarded to Anthropic API
-4. SSE response piped through `StreamInterceptor.ProcessEvent()` in `stream.go`
-5. `content_block_start` with type=tool_use, name=bash triggers buffering
-6. `content_block_delta` events accumulate partial JSON
-7. `content_block_stop` triggers injection decision:
-   - `Engine.ShouldInject()` checks frequency/jitter/cooldown
-   - `Selector.SelectTrap()` picks template by keyword match
-   - `CallbackHandler.RegisterTrap()` stores trap + writes trap file to disk
-   - Modified SSE deltas emitted back to Claude Code
+**Trap detection via request body (primary):** Next API request -> `checkForTrapResult()` (handler.go) matches `tool_result` by `tool_use_id` -> scans for rejection phrases ("was rejected", "doesn't want to proceed", "user denied") -> caught or missed -> `CallbackHandler.ResolveTrap()` reports to dashboard
 
-### 2. Trap detection via request body (primary detection)
+**Trap detection via hook (secondary):** `POST /hooks/pre-tool-use` -> `HookHandler.HandlePreToolUse()` (hook.go) -> `MatchCommand()` against active trap -> deny if matched. Fires before user confirmation dialog, so less reliable.
 
-1. Next Claude Code API request hits `HandleProxy()`
-2. `checkForTrapResult()` scans messages for `tool_result` matching active trap's `tool_use_id`
-3. Content checked for rejection phrases ("was rejected", "doesn't want to proceed", "user denied") - result = "caught"
-4. No rejection phrases found - result = "missed" (command ran but failed on nonexistent targets)
-5. `CallbackHandler.ResolveTrap()` reports to dashboard
-
-### 3. Trap detection via PreToolUse hook (secondary)
-
-1. Claude Code calls `POST /hooks/pre-tool-use` - `HookHandler.HandlePreToolUse()` in `hook.go`
-2. Validates optional `X-Hook-Secret` header, parses command from request
-3. `MatchCommand()` compares against active trap
-4. If matched: resolves as "missed", responds with deny
-5. Note: fires before user confirmation dialog, so not reliable as primary detection
-
-### 4. Shell wrapper setup
-
-1. `agentsaegis setup-shell` detects shell from `$SHELL`
-2. Generates `claude()` and `copilot()` wrapper functions:
-   - `claude()`: sets `ANTHROPIC_BASE_URL=http://localhost:PORT`, auto-starts proxy
-   - `copilot()`: sets `HTTPS_PROXY=http://localhost:PORT`, auto-starts proxy
-   - Both fail open - if proxy can't start, run command directly
+**Shell wrapper:** `agentsaegis setup-shell` generates `claude()` (sets `ANTHROPIC_BASE_URL`) and `copilot()` (sets `HTTPS_PROXY`) wrapper functions. Both fail open if proxy can't start.
 
 ## Data Models
 
 No database. All state is ephemeral or file-based:
 
-**ActiveTrap** (in-memory, `internal/trap/engine.go:32`):
-- `ID` (string) - unique trap ID like `trap_1234567890`
-- `ToolUseID` (string) - Claude's tool_use block ID for matching tool_result
-- `TemplateID`, `Category`, `Severity` - from template
-- `TrapCommand` (string) - the injected command
-- `OriginalCommand` (string) - the replaced command
-- `InjectedAt` (time.Time)
-- `Triggered` (atomic.Bool), `Resolved` (atomic.Bool) - prevent double-resolution
+**ActiveTrap** (in-memory, `engine.go:32`): ID, ToolUseID (for matching tool_result), TemplateID, Category, Severity, TrapCommand, OriginalCommand, InjectedAt. `Triggered`/`Resolved` are atomic.Bool to prevent double-resolution.
 
-**Template** (loaded from embedded YAML, `internal/trap/templates.go:22`):
-- `id`, `category`, `subcategory`, `severity`, `name`, `description`
-- `triggers.keywords[]` - command keywords that make this template relevant
-- `trap_commands[]` - list of possible trap commands (one chosen at random)
-- `training` - title, risk, real_world, lesson, red_flags[], time_to_read
+**Template** (embedded YAML, `templates.go:22`): id, category, severity, `triggers.keywords[]`, `trap_commands[]`, `training` (title, risk, lesson, red_flags[]). Loaded at compile time via `go:embed`.
 
-**Trap file** (JSON on disk at `~/.agentsaegis/traps/<id>.json`, `internal/trap/trapfile.go:12`):
-- `id`, `trap_command`, `template_id`, `category`, `severity`, `injected_at`, `expires_at`
-- TTL: 2 minutes
+**Trap file** (JSON at `~/.agentsaegis/traps/<id>.json`, `trapfile.go:12`): Serialized active trap for fallback detection. TTL: 2 minutes.
 
-**Config** (`~/.agentsaegis/config.yaml`, `internal/config/config.go:13`):
-- `dashboard_url`, `api_token`, `proxy_port`, `anthropic_base_url`, `developer_id`, `org_id`, `log_level`
+**Config** (`~/.agentsaegis/config.yaml`, `config.go:13`): dashboard_url, api_token, proxy_port, anthropic_base_url, developer_id, org_id, log_level
 
 ## Auth & Sessions
 
@@ -334,35 +290,21 @@ To write a new test:
 
 ## Gotchas
 
-- **Fail-open by design.** This is the most important architectural decision in the proxy. If the proxy is down, Claude Code hooks fail open - commands execute without any trap checking. The shell wrapper (`claude()` function) mitigates this by only setting `ANTHROPIC_BASE_URL` when the proxy health check passes. If the proxy is unreachable, Claude Code talks directly to Anthropic with no interception at all. The trap file mechanism (`~/.agentsaegis/traps/*.json`) exists as a fallback for detecting active traps even if the hook HTTP call fails. Any future developer must preserve this fail-open guarantee - the proxy must never prevent Claude Code from working.
-
-- **Trap commands must be inherently safe.** `ValidateTrapSafety()` rejects commands that could cause real harm. All `rm` targets must be under `/tmp/.aegis-trap*`, all network destinations must be `0.0.0.0` (connection refused), all packages must use `aegis-trap-nonexistent` prefix, all git operations must use `--dry-run` or `aegis-nonexistent-remote`. If you add a trap that fails safety validation, it's silently dropped at startup.
-
-- **Accept-Encoding is stripped from upstream requests** (handler.go:128). Without this, Anthropic sends gzip-compressed SSE streams that the proxy can't parse for trap injection.
-
-- **Only one active trap at a time.** `Engine.ShouldInject()` returns false while there's an active trap or pending injection. The `pendingInject` flag prevents TOCTOU races between `ShouldInject()` and `SetActiveTrap()`.
-
-- **Trap resolution is idempotent.** `ActiveTrap.Resolved` is an `atomic.Bool` - the first call to `ResolveTrap()` wins, subsequent calls are no-ops. Both the hook path and request-body path can detect resolution, so this prevents double-reporting.
-
-- **Hook cooldown.** After a trap is resolved via the hook, `HookHandler` suppresses the next 10 commands (`hookCooldownCommands`) to avoid re-blocking related commands in the same sequence.
-
-- **SSE buffering.** The `StreamInterceptor` buffers ALL events for a bash tool_use content block until `content_block_stop`. Non-bash blocks pass through immediately. If injection fails, buffered events are flushed unchanged.
-
-- **Scanner buffer size.** SSE scanner uses a 1MB max buffer (`handler.go:159`) for large payloads. If an SSE event exceeds this, the scanner will error.
-
-- **Config file location is hardcoded** to `~/.agentsaegis/config.yaml`. The `AEGIS_` env prefix overrides config values but there's no CLI flag to specify a different config path.
-
-- **SSE panic recovery.** The SSE interceptor runs inside `processSSEStream()` with `defer recover()`. If the interceptor panics, remaining upstream data is passed through unmodified via `drainSSEPassthrough()`. The proxy never crashes from a bad trap injection.
-
-- **The shell wrapper uses `claude()` and `copilot()` functions**, not aliases or env exports. `claude()` sets `ANTHROPIC_BASE_URL`, `copilot()` sets `HTTPS_PROXY`. Other tools using these APIs won't be proxied unless they also use the relevant env var.
-
-- **Trap result detection checks content, not is_error.** `checkForTrapResult()` scans the tool_result content for rejection phrases ("was rejected", "doesn't want to proceed"). It does NOT use the `is_error` boolean because trap commands always fail with `is_error: true` (nonexistent targets). This was fixed in v0.5.1.
-
-- **`--super-debug` mode** injects a trap on every single bash command and auto-clears stale traps. It also disables cooldown and jitter on the hook handler. Use it for testing trap injection/detection mechanics.
-
-- **Trap templates are embedded at compile time** via `go:embed all:traps` in `templates.go`. Changes to YAML files require recompilation. There's no runtime template loading.
-
-- **The `expired` result is mapped to `missed`** when reporting to the dashboard API (callback.go:123) because the DB constraint only allows missed/caught/edited.
+1. **Fail-open by design.** Proxy down = commands execute normally. Shell wrapper only sets `ANTHROPIC_BASE_URL` if health check passes. Trap files (`~/.agentsaegis/traps/*.json`) are fallback detection. Never break this guarantee.
+2. **Trap safety enforced.** `ValidateTrapSafety()` rejects harmful commands. All targets must be `/tmp/.aegis-trap*`, `0.0.0.0`, `aegis-trap-nonexistent*`, or `--dry-run`. Failed checks = silently dropped at startup.
+3. **Accept-Encoding stripped** (handler.go:128) - otherwise Anthropic sends gzip SSE that can't be parsed.
+4. **One active trap at a time.** `pendingInject` flag prevents TOCTOU between `ShouldInject()` and `SetActiveTrap()`.
+5. **Idempotent resolution.** `atomic.Bool` on `Resolved` - first `ResolveTrap()` wins, prevents double-reporting.
+6. **Hook cooldown.** 10 commands suppressed after hook resolution (`hookCooldownCommands`) to avoid re-blocking.
+7. **SSE buffering.** All events for a bash tool_use block buffered until `content_block_stop`. Non-bash passes through. Failed injection = flush unchanged.
+8. **1MB scanner buffer** (handler.go:159) for SSE events. Larger events will error.
+9. **Config hardcoded** to `~/.agentsaegis/config.yaml`. `AEGIS_` env vars override but no CLI flag for path.
+10. **SSE panic recovery.** `defer recover()` in `processSSEStream()` - panics fall through to `drainSSEPassthrough()`.
+11. **Shell wrapper uses functions**, not aliases. Only `claude()` and `copilot()` are proxied.
+12. **Detection checks content, not is_error.** Rejection phrases in tool_result content, not the `is_error` bool (traps always fail).
+13. **`--super-debug`:** Trap on every bash command, no cooldown/jitter. For testing only.
+14. **Templates embedded at compile time** (`go:embed`). YAML changes require recompilation.
+15. **`expired` mapped to `missed`** when reporting (callback.go:123) - DB only allows missed/caught/edited.
 
 ## External Services
 
@@ -383,4 +325,6 @@ To write a new test:
 ## Related Repos
 
 - **agentsaegis/homebrew-tap** - Homebrew formula for `agentsaegis` (auto-updated by GoReleaser)
-- **AgentsAegis monorepo** (private, not public) - Go API + React web app for team management, assessments, analytics, and training. This is the backend that serves `api.agentsaegis.com` and the web dashboard at `agentsaegis.com`.
+- **AgentsAegis monorepo** (private) - Go API + React web dashboard. Local clone: `~/personal-project/agentsaegis/agentsaegis`
+
+**Cross-repo debugging:** Event reporting and dashboard issues span both repos. In the monorepo, check: `api/internal/handler/events.go` (event ingestion via `POST /api/proxy/events`), `api/internal/handler/dashboard.go` (analytics queries), `api/internal/store/events.go` (DB queries for trap_events table).
