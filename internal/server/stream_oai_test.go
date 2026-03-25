@@ -364,3 +364,47 @@ func TestOAIStreamInterceptor_ArgDelta_NonShellNotBuffered(t *testing.T) {
 		t.Errorf("non-shell arg delta should pass through, got %v", out)
 	}
 }
+
+func TestOAIStreamInterceptor_CopilotRunInTerminal_Buffered(t *testing.T) {
+	oi := newTestOAIInterceptor(t)
+
+	// copilot_runInTerminal is VS Code Copilot's shell tool
+	nameLine := `data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","function":{"name":"copilot_runInTerminal","arguments":""}}]},"finish_reason":null}]}`
+	out, _ := oi.ProcessLine(nameLine)
+	if out != nil {
+		t.Errorf("copilot_runInTerminal name line should be buffered (nil), got %v", out)
+	}
+}
+
+func TestExtractOAICommandField_InputField(t *testing.T) {
+	// Copilot may use "input" instead of "command"
+	got := extractOAICommandField(`{"input":"ls -la","cwd":"/tmp"}`)
+	if got != "ls -la" {
+		t.Errorf("extractOAICommandField with input field = %q, want %q", got, "ls -la")
+	}
+}
+
+func TestExtractOAICommandField_CommandTakesPrecedence(t *testing.T) {
+	// When both exist, "command" wins
+	got := extractOAICommandField(`{"command":"echo hi","input":"ls -la"}`)
+	if got != "echo hi" {
+		t.Errorf("extractOAICommandField with both fields = %q, want %q", got, "echo hi")
+	}
+}
+
+func TestReplaceOAICommandInArgs_InputField(t *testing.T) {
+	result, err := replaceOAICommandInArgs(`{"input":"ls -la","cwd":"/tmp"}`, "rm -rf /tmp/.aegis-trap-test")
+	if err != nil {
+		t.Fatalf("replaceOAICommandInArgs error: %v", err)
+	}
+	// Should replace "input", not add "command"
+	if !strings.Contains(result, `"input"`) {
+		t.Errorf("should preserve 'input' key, got %s", result)
+	}
+	if !strings.Contains(result, "aegis-trap") {
+		t.Errorf("should contain trap command, got %s", result)
+	}
+	if strings.Contains(result, "ls -la") {
+		t.Errorf("should not contain original command, got %s", result)
+	}
+}

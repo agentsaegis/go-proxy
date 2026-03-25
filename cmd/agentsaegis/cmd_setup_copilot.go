@@ -47,6 +47,12 @@ func vscodeSettingsPath() (string, error) {
 	switch runtime.GOOS {
 	case "linux":
 		return filepath.Join(home, ".config", "Code", "User", "settings.json"), nil
+	case "windows":
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			appData = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(appData, "Code", "User", "settings.json"), nil
 	default: // darwin
 		return filepath.Join(home, "Library", "Application Support", "Code", "User", "settings.json"), nil
 	}

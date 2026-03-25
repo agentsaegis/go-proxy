@@ -99,6 +99,38 @@ func sendCONNECT(t *testing.T, proxyAddr, target string) net.Conn {
 	return conn
 }
 
+func TestShouldMITM(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		// Exact matches
+		{"api.github.com", true},
+		{"api.individual.githubcopilot.com", true},
+		{"api.business.githubcopilot.com", true},
+		{"api.enterprise.githubcopilot.com", true},
+		{"copilot-proxy.githubusercontent.com", true},
+		// Suffix matches (wildcard *.githubcopilot.com)
+		{"api.new-plan.githubcopilot.com", true},
+		{"anything.githubcopilot.com", true},
+		// Suffix matches (*.githubusercontent.com)
+		{"copilot-telemetry.githubusercontent.com", true},
+		// Case insensitive
+		{"API.GITHUB.COM", true},
+		{"Copilot-Proxy.GitHubUserContent.com", true},
+		// Non-MITM hosts
+		{"github.com", false},
+		{"example.com", false},
+		{"registry.npmjs.org", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := shouldMITM(tt.host); got != tt.want {
+			t.Errorf("shouldMITM(%q) = %v, want %v", tt.host, got, tt.want)
+		}
+	}
+}
+
 // TestConnectHandler_200ConnectionEstablished verifies that a CONNECT request
 // receives a "200 Connection Established" response.
 func TestConnectHandler_200ConnectionEstablished(t *testing.T) {
@@ -611,5 +643,103 @@ func TestConnectHandler_SSEInterception_ConnectionStaysOpen(t *testing.T) {
 
 	if requestCount != 2 {
 		t.Errorf("upstream received %d requests, want 2", requestCount)
+	}
+}
+
+func TestCheckForOAIToolResult_Missed(t *testing.T) {
+	ch, _ := setupConnectHandler(t)
+
+	// Register a trap so there's an active trap to check against
+	tmpl := &trap.Template{
+		ID:           "trap_ls",
+		Category:     "destructive",
+		Severity:     "critical",
+		TrapCommands: []string{"rm -rf /tmp/.aegis-trap-test"},
+		Training:     trap.Training{Title: "Test trap"},
+	}
+	ch.callbackHandler.RegisterTrap("ls -la", tmpl, "call_test123")
+
+	// Simulate OpenAI-format tool result (command failed = missed)
+	body := []byte(`{
+		"messages": [
+			{"role": "user", "content": "run ls"},
+			{"role": "assistant", "content": null, "tool_calls": [{"id": "call_test123", "function": {"name": "copilot_runInTerminal", "arguments": "{\"command\":\"ls -la\"}"}}]},
+			{"role": "tool", "tool_call_id": "call_test123", "content": "No such file or directory"}
+		]
+	}`)
+
+	ch.checkForOAIToolResult(body)
+
+	// Trap should be resolved
+	activeTrap := ch.trapEngine.GetActiveTrap()
+	if activeTrap != nil && activeTrap.Resolved.Load() == false {
+		t.Error("trap should be resolved after tool result detected")
+	}
+}
+
+func TestCheckForOAIToolResult_Caught(t *testing.T) {
+	ch, _ := setupConnectHandler(t)
+
+	tmpl := &trap.Template{
+		ID:           "trap_ls",
+		Category:     "destructive",
+		Severity:     "critical",
+		TrapCommands: []string{"rm -rf /tmp/.aegis-trap-test"},
+		Training:     trap.Training{Title: "Test trap"},
+	}
+	ch.callbackHandler.RegisterTrap("ls -la", tmpl, "call_deny456")
+
+	// Simulate user rejection (caught)
+	body := []byte(`{
+		"messages": [
+			{"role": "tool", "tool_call_id": "call_deny456", "content": "The user denied this operation"}
+		]
+	}`)
+
+	ch.checkForOAIToolResult(body)
+
+	activeTrap := ch.trapEngine.GetActiveTrap()
+	if activeTrap != nil && activeTrap.Resolved.Load() == false {
+		t.Error("trap should be resolved after rejection detected")
+	}
+}
+
+func TestCheckForOAIToolResult_NoActiveTrap(t *testing.T) {
+	ch, _ := setupConnectHandler(t)
+
+	// No active trap - should not panic or error
+	body := []byte(`{
+		"messages": [
+			{"role": "tool", "tool_call_id": "call_xyz", "content": "output"}
+		]
+	}`)
+
+	ch.checkForOAIToolResult(body) // should be a no-op
+}
+
+func TestCheckForOAIToolResult_WrongToolCallID(t *testing.T) {
+	ch, _ := setupConnectHandler(t)
+
+	tmpl := &trap.Template{
+		ID:           "trap_ls",
+		Category:     "destructive",
+		Severity:     "critical",
+		TrapCommands: []string{"rm -rf /tmp/.aegis-trap-test"},
+		Training:     trap.Training{Title: "Test trap"},
+	}
+	ch.callbackHandler.RegisterTrap("ls -la", tmpl, "call_correct")
+
+	// Tool result for a different tool call - should NOT resolve trap
+	body := []byte(`{
+		"messages": [
+			{"role": "tool", "tool_call_id": "call_wrong", "content": "output"}
+		]
+	}`)
+
+	ch.checkForOAIToolResult(body)
+
+	activeTrap := ch.trapEngine.GetActiveTrap()
+	if activeTrap == nil {
+		t.Error("trap should still be active (wrong tool_call_id)")
 	}
 }

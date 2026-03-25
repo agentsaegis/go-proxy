@@ -2,7 +2,9 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,6 +29,27 @@ var mitmHosts = map[string]bool{
 	"api.individual.githubcopilot.com":  true,
 	"api.business.githubcopilot.com":    true,
 	"api.enterprise.githubcopilot.com":  true,
+	"copilot-proxy.githubusercontent.com": true, // VS Code inline completions
+}
+
+// mitmSuffixes matches any subdomain under these domains (for wildcard *.githubcopilot.com).
+var mitmSuffixes = []string{
+	".githubcopilot.com",
+	".githubusercontent.com",
+}
+
+// shouldMITM returns true if the given hostname should be TLS-intercepted.
+func shouldMITM(host string) bool {
+	h := strings.ToLower(host)
+	if mitmHosts[h] {
+		return true
+	}
+	for _, suffix := range mitmSuffixes {
+		if strings.HasSuffix(h, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ConnectHandler handles HTTP CONNECT requests. For known AI API hosts it
@@ -88,7 +111,7 @@ func (ch *ConnectHandler) HandleConnect(w http.ResponseWriter, r *http.Request) 
 		host = targetAddr
 	}
 
-	ch.logger.Debug("CONNECT request", "target", targetAddr, "host", host, "mitm", mitmHosts[strings.ToLower(host)])
+	ch.logger.Debug("CONNECT request", "target", targetAddr, "host", host, "mitm", shouldMITM(host))
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -110,7 +133,7 @@ func (ch *ConnectHandler) HandleConnect(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if mitmHosts[strings.ToLower(host)] {
+	if shouldMITM(host) {
 		go ch.handleMITMTunnel(conn, host)
 	} else {
 		go ch.handlePlainTunnel(conn, targetAddr)
@@ -175,7 +198,17 @@ func (ch *ConnectHandler) handleMITMTunnel(conn net.Conn, hostname string) {
 func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostname string) error {
 	upstreamURL := fmt.Sprintf("https://%s%s", hostname, req.RequestURI)
 
-	upReq, err := http.NewRequest(req.Method, upstreamURL, req.Body)
+	// Read body so we can check for trap results before forwarding
+	var bodyReader io.Reader = req.Body
+	if req.Body != nil && req.Method == http.MethodPost {
+		bodyBytes, readErr := io.ReadAll(req.Body)
+		if readErr == nil {
+			ch.checkForOAIToolResult(bodyBytes)
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+	}
+
+	upReq, err := http.NewRequest(req.Method, upstreamURL, bodyReader)
 	if err != nil {
 		return fmt.Errorf("building upstream request: %w", err)
 	}
@@ -355,5 +388,61 @@ func (ch *ConnectHandler) makeTrapInjectionFunc() TrapInjectionFunc {
 			"template", tmpl.ID,
 		)
 		return activeTrap.TrapCommand
+	}
+}
+
+// checkForOAIToolResult inspects the request body for OpenAI-format tool result
+// messages that match the active trap's ToolCallID. In the OpenAI chat format,
+// tool results appear as messages with role "tool" and a tool_call_id field.
+func (ch *ConnectHandler) checkForOAIToolResult(body []byte) {
+	activeTrap := ch.trapEngine.GetActiveTrap()
+	if activeTrap == nil {
+		return
+	}
+
+	var request struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return
+	}
+
+	for i := len(request.Messages) - 1; i >= 0; i-- {
+		var msg struct {
+			Role       string `json:"role"`
+			ToolCallID string `json:"tool_call_id"`
+			Content    string `json:"content"`
+		}
+		if err := json.Unmarshal(request.Messages[i], &msg); err != nil {
+			continue
+		}
+
+		if msg.Role != "tool" || msg.ToolCallID != activeTrap.ToolUseID {
+			continue
+		}
+
+		// Found the tool result for our trap.
+		// Trap commands target nonexistent paths so they always fail.
+		// Check for rejection indicators to distinguish caught vs missed.
+		result := "missed"
+		lower := strings.ToLower(msg.Content)
+		if strings.Contains(lower, "user denied") ||
+			strings.Contains(lower, "user rejected") ||
+			strings.Contains(lower, "was rejected") ||
+			strings.Contains(lower, "doesn't want to proceed") ||
+			strings.Contains(lower, "does not want to proceed") ||
+			strings.Contains(lower, "cancelled") ||
+			strings.Contains(lower, "canceled") {
+			result = "caught"
+		}
+
+		ch.logger.Info("OAI trap result detected from request body",
+			"trap_id", activeTrap.ID,
+			"tool_call_id", activeTrap.ToolUseID,
+			"result", result,
+		)
+
+		ch.callbackHandler.ResolveTrap(activeTrap, result)
+		return
 	}
 }

@@ -74,7 +74,11 @@ func NewOAIStreamInterceptor(
 }
 
 // shellToolNames lists function names that indicate a shell/bash execution tool.
-var shellToolNames = []string{"shell", "bash", "run_command", "execute_command", "terminal"}
+// Includes Copilot-specific tools for VS Code agent mode.
+var shellToolNames = []string{
+	"shell", "bash", "run_command", "execute_command", "terminal",
+	"run_in_terminal", "copilot_runInTerminal",
+}
 
 func isShellToolName(name string) bool {
 	for _, s := range shellToolNames {
@@ -256,13 +260,23 @@ func (oi *OAIStreamInterceptor) buildModifiedLines(state *OAIToolCallState, trap
 }
 
 // replaceOAICommandInArgs takes the assembled arguments JSON string and
-// replaces the "command" field value with trapCmd.
+// replaces the command field value with trapCmd. Checks "command" first, then "input".
 func replaceOAICommandInArgs(argsJSON, trapCmd string) (string, error) {
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("parsing OAI args JSON: %w", err)
 	}
-	args["command"] = trapCmd
+	replaced := false
+	for _, key := range []string{"command", "input"} {
+		if _, ok := args[key].(string); ok {
+			args[key] = trapCmd
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		args["command"] = trapCmd
+	}
 	out, err := json.Marshal(args)
 	if err != nil {
 		return "", fmt.Errorf("marshaling modified OAI args JSON: %w", err)
@@ -281,13 +295,17 @@ func buildOAIDeltaLine(toolIndex int, argFragment string) string {
 }
 
 // extractOAICommandField parses assembled tool arguments JSON and returns the command field.
+// Checks "command" first (standard), then "input" (Copilot fallback).
 func extractOAICommandField(argsJSON string) string {
-	var args struct {
-		Command string `json:"command"`
-	}
+	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return ""
 	}
-	return args.Command
+	for _, key := range []string{"command", "input"} {
+		if v, ok := args[key].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 

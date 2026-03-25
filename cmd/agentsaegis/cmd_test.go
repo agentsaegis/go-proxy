@@ -40,7 +40,7 @@ func TestRootCommand_HasSubcommands(t *testing.T) {
 		names[cmd.Name()] = true
 	}
 
-	for _, want := range []string{"start", "init", "status", "stop", "setup-shell", "remove-shell", "report", "mcp", "launch", "setup-desktop", "remove-desktop", "hook", "setup-copilot", "remove-copilot", "reload", "install-service", "uninstall-service", "trust-cert", "untrust-cert"} {
+	for _, want := range []string{"start", "init", "status", "stop", "setup-shell", "remove-shell", "report", "mcp", "launch", "setup-desktop", "remove-desktop", "hook", "setup-copilot", "remove-copilot", "setup-vscode", "remove-vscode", "reload", "install-service", "uninstall-service", "trust-cert", "untrust-cert"} {
 		if !names[want] {
 			t.Errorf("root command missing subcommand %q", want)
 		}
