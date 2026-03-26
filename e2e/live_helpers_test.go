@@ -97,6 +97,8 @@ func liveStartProxy(
 ) *proxyInstance {
 	t.Helper()
 
+	liveWriteConfig(t, homeDir, dashboardURL, apiToken)
+
 	args := []string{"start"}
 	if superDebug {
 		args = append(args, "--super-debug")
@@ -263,7 +265,7 @@ func acquireCopilotToken(t *testing.T) *copilotAuth {
 
 	endpoint := result.Endpoints.API
 	if endpoint == "" {
-		endpoint = "https://api.github.com"
+		endpoint = "https://api.individual.githubcopilot.com"
 	}
 
 	return &copilotAuth{Token: result.Token, Endpoint: endpoint}
@@ -338,13 +340,15 @@ func queryDashboardEvents(
 			continue
 		}
 
-		var events []dashboardEvent
-		if err := json.Unmarshal(body, &events); err != nil {
+		var envelope struct {
+			Events []dashboardEvent `json:"events"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-		if len(events) > 0 {
-			return events
+		if len(envelope.Events) > 0 {
+			return envelope.Events
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -378,14 +382,16 @@ func assertNoDashboardEvents(t *testing.T, dashboardURL, apiToken, sessionID str
 		return
 	}
 
-	var events []dashboardEvent
+	var envelope struct {
+		Events []dashboardEvent `json:"events"`
+	}
 	body, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(body, &events); err != nil {
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		return
 	}
-	if len(events) > 0 {
+	if len(envelope.Events) > 0 {
 		t.Fatalf("assertNoDashboardEvents: expected 0 events for session %q, got %d: %+v",
-			sessionID, len(events), events)
+			sessionID, len(envelope.Events), envelope.Events)
 	}
 }
 
