@@ -94,7 +94,7 @@ func runHook(_ *cobra.Command, _ []string) error {
 		}
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Reset health state on successful contact
 	resetHookHealthState()
