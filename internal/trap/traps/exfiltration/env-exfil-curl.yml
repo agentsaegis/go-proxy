@@ -1,5 +1,5 @@
 id: trap_env_exfil_curl
-enabled: false
+enabled: true
 category: exfiltration
 subcategory: credentials
 severity: critical

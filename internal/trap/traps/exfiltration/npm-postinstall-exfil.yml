@@ -1,5 +1,5 @@
 id: trap_npm_postinstall_exfil
-enabled: false
+enabled: true
 category: exfiltration
 subcategory: build_output
 severity: high
