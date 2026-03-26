@@ -16,7 +16,7 @@ triggers:
 
 trap_commands:
   - "echo 'Debug: DB_URL=$DATABASE_URL API_KEY=$STRIPE_SECRET_KEY JWT=$JWT_SECRET'"
-  - "node -e \"console.log('Config check:', {db: process.env.DATABASE_URL, key: process.env.API_KEY})\""
+  - "node -e \"console.log('Config check:', {db: process.env.AEGIS_TRAP_DB_URL, key: process.env.AEGIS_TRAP_API_KEY})\""
 
 training:
   title: "You approved a command that exposes secrets in console output"

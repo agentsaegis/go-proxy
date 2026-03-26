@@ -25,17 +25,19 @@ import (
 var errSSEPassthrough = fmt.Errorf("SSE passthrough active")
 
 var mitmHosts = map[string]bool{
-	"api.github.com":                    true,
-	"api.individual.githubcopilot.com":  true,
-	"api.business.githubcopilot.com":    true,
-	"api.enterprise.githubcopilot.com":  true,
-	"copilot-proxy.githubusercontent.com": true, // VS Code inline completions
+	"api.github.com":                         true,
+	"api.individual.githubcopilot.com":       true,
+	"api.business.githubcopilot.com":         true,
+	"api.enterprise.githubcopilot.com":       true,
+	"copilot-proxy.githubusercontent.com":    true, // VS Code inline completions
+	"copilot-telemetry.githubusercontent.com": true, // VS Code telemetry
 }
 
 // mitmSuffixes matches any subdomain under these domains (for wildcard *.githubcopilot.com).
+// Only Copilot API domains are matched - not all of githubusercontent.com (which includes
+// raw content, avatars, CDN assets that don't need interception).
 var mitmSuffixes = []string{
 	".githubcopilot.com",
-	".githubusercontent.com",
 }
 
 // shouldMITM returns true if the given hostname should be TLS-intercepted.
@@ -240,8 +242,6 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 		_ = errResp.Write(conn)
 		return fmt.Errorf("upstream request failed: %w", err)
 	}
-	defer resp.Body.Close()
-
 	contentType := resp.Header.Get("Content-Type")
 	ch.logger.Debug("MITM upstream response", "status", resp.StatusCode, "content_type", contentType, "url", upstreamURL)
 
@@ -251,6 +251,7 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 		strings.Contains(req.RequestURI, "/chat/completions")
 	if isChatSSE {
 		ch.logger.Info("MITM SSE stream detected, intercepting", "url", upstreamURL)
+		defer resp.Body.Close()
 		return ch.forwardSSEResponse(conn, resp)
 	}
 
@@ -270,18 +271,18 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 		}
 		headerBuf.WriteString("\r\n")
 		if _, err := conn.Write([]byte(headerBuf.String())); err != nil {
+			resp.Body.Close()
 			return fmt.Errorf("writing SSE passthrough headers: %w", err)
 		}
-		// Stream body in background - this SSE may be long-lived
+		// Goroutine owns resp.Body from here - no outer defer to race with.
 		go func() {
 			defer resp.Body.Close()
 			io.Copy(conn, resp.Body)
 		}()
-		// Return a sentinel error to break out of the request loop for this
-		// connection since we handed off the body to a goroutine.
 		return errSSEPassthrough
 	}
 
+	defer resp.Body.Close()
 	return resp.Write(conn)
 }
 
@@ -431,6 +432,8 @@ func (ch *ConnectHandler) checkForOAIToolResult(body []byte) {
 			strings.Contains(lower, "was rejected") ||
 			strings.Contains(lower, "doesn't want to proceed") ||
 			strings.Contains(lower, "does not want to proceed") ||
+			strings.Contains(lower, "operation not permitted") ||
+			strings.Contains(lower, "the user denied this operation") ||
 			strings.Contains(lower, "cancelled") ||
 			strings.Contains(lower, "canceled") {
 			result = "caught"

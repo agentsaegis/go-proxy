@@ -110,18 +110,19 @@ func TestShouldMITM(t *testing.T) {
 		{"api.business.githubcopilot.com", true},
 		{"api.enterprise.githubcopilot.com", true},
 		{"copilot-proxy.githubusercontent.com", true},
+		{"copilot-telemetry.githubusercontent.com", true},
 		// Suffix matches (wildcard *.githubcopilot.com)
 		{"api.new-plan.githubcopilot.com", true},
 		{"anything.githubcopilot.com", true},
-		// Suffix matches (*.githubusercontent.com)
-		{"copilot-telemetry.githubusercontent.com", true},
 		// Case insensitive
 		{"API.GITHUB.COM", true},
 		{"Copilot-Proxy.GitHubUserContent.com", true},
-		// Non-MITM hosts
+		// Non-MITM hosts (including non-Copilot githubusercontent)
 		{"github.com", false},
 		{"example.com", false},
 		{"registry.npmjs.org", false},
+		{"raw.githubusercontent.com", false},
+		{"avatars.githubusercontent.com", false},
 		{"", false},
 	}
 	for _, tt := range tests {

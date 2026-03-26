@@ -72,6 +72,7 @@ cmd/
     cmd_launch.go        # `launch claude-desktop` - launches Desktop app with proxy env var
     cmd_hook.go          # `hook` command - bridge for Copilot/VS Code PreToolUse hooks (stdin/stdout)
     cmd_setup_copilot.go # `setup-copilot` / `remove-copilot` - configures Copilot hooks + MCP in VS Code
+    cmd_setup_vscode.go  # `setup-vscode` / `remove-vscode` - configures VS Code http.proxy for Copilot interception
     cmd_trust_cert.go    # `trust-cert` / `untrust-cert` - adds/removes proxy CA from system trust store
     cmd_reload.go        # `reload` command - sends SIGHUP to daemon for hot config reload
     cmd_service.go       # `install-service` / `uninstall-service` - launchd (macOS) / systemd (Linux) service management
@@ -323,6 +324,12 @@ agentsaegis setup-copilot    # Add hooks + MCP server to VS Code/Copilot
 agentsaegis remove-copilot   # Remove hooks + MCP server from VS Code/Copilot
 ```
 
+### Setup VS Code proxy for Copilot interception
+```bash
+agentsaegis setup-vscode     # Configure VS Code http.proxy + generate CA cert
+agentsaegis remove-vscode    # Remove proxy settings from VS Code
+```
+
 ### Trust / untrust proxy CA for Copilot HTTPS interception
 ```bash
 sudo agentsaegis trust-cert    # Add proxy CA to system trust store (macOS/Linux)
@@ -477,7 +484,7 @@ To write a new test:
 
 - **The `copilot()` shell wrapper sets `HTTPS_PROXY`** rather than injecting hook files. Copilot CLI routes all HTTPS traffic through the proxy as a CONNECT tunnel. The proxy performs TLS MITM for `api.github.com` using the CA from `~/.agentsaegis/ca.pem`. The CA must be trusted by the system (via `sudo agentsaegis trust-cert`) for TLS MITM to work without TLS errors.
 
-- **CONNECT MITM only targets known AI API hosts** (`api.github.com`). All other CONNECT targets are passed through as plain TCP tunnels without TLS termination. To add more hosts, update `mitmHosts` in `internal/server/connect.go`.
+- **CONNECT MITM only targets known AI API hosts** (`api.github.com`, `*.githubcopilot.com`, `copilot-proxy.githubusercontent.com`, `copilot-telemetry.githubusercontent.com`). All other CONNECT targets are passed through as plain TCP tunnels without TLS termination. To add more hosts, update `mitmHosts` or `mitmSuffixes` in `internal/server/connect.go`.
 
 - **The TLS proxy CA key** is stored at `~/.agentsaegis/ca-key.pem` with 0600 permissions. The CA cert is at `~/.agentsaegis/ca.pem` (0644). Both are generated on first proxy start if absent. After a Homebrew upgrade, the CA files persist; only re-run `sudo agentsaegis trust-cert` if the key was rotated.
 
