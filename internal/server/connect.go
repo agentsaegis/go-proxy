@@ -206,6 +206,8 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 		bodyBytes, readErr := io.ReadAll(req.Body)
 		if readErr == nil {
 			ch.checkForOAIToolResult(bodyBytes)
+			ch.checkForResponsesToolResult(bodyBytes)
+			ch.checkForAnthropicToolResult(bodyBytes)
 			bodyReader = bytes.NewReader(bodyBytes)
 		}
 	}
@@ -245,11 +247,12 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 	contentType := resp.Header.Get("Content-Type")
 	ch.logger.Debug("MITM upstream response", "status", resp.StatusCode, "content_type", contentType, "url", upstreamURL)
 
-	// Intercept chat/completions (OpenAI format) and /v1/messages (Anthropic format)
-	// for trap injection. Other SSE endpoints (like /mcp/readonly) pass through.
+	// Intercept chat/completions (OpenAI Chat), /v1/messages (Anthropic), and
+	// /responses (OpenAI Responses API) for trap injection.
 	isSSE := strings.Contains(contentType, "text/event-stream")
 	isOAIChatSSE := isSSE && strings.Contains(req.RequestURI, "/chat/completions")
 	isAnthropicSSE := isSSE && strings.Contains(req.RequestURI, "/v1/messages")
+	isResponsesSSE := isSSE && (req.RequestURI == "/responses" || strings.HasPrefix(req.RequestURI, "/responses?"))
 
 	if isOAIChatSSE {
 		ch.logger.Info("MITM OAI SSE stream detected, intercepting", "url", upstreamURL)
@@ -260,6 +263,11 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 		ch.logger.Info("MITM Anthropic SSE stream detected, intercepting", "url", upstreamURL)
 		defer func() { _ = resp.Body.Close() }()
 		return ch.forwardAnthropicSSEResponse(conn, resp)
+	}
+	if isResponsesSSE {
+		ch.logger.Info("MITM Responses API SSE stream detected, intercepting", "url", upstreamURL)
+		defer func() { _ = resp.Body.Close() }()
+		return ch.forwardResponsesSSE(conn, resp)
 	}
 
 	// For non-intercepted SSE streams (like /mcp/readonly), write headers
@@ -492,6 +500,128 @@ func (ch *ConnectHandler) forwardAnthropicSSEResponse(conn net.Conn, resp *http.
 	return scanner.Err()
 }
 
+// forwardResponsesSSE handles the OpenAI Responses API streaming format (/responses).
+// Uses event/data SSE pairs like the Anthropic path, but with Responses API events.
+func (ch *ConnectHandler) forwardResponsesSSE(conn net.Conn, resp *http.Response) error {
+	writer := bufio.NewWriter(conn)
+
+	fmt.Fprintf(writer, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
+	for key, values := range resp.Header {
+		lower := strings.ToLower(key)
+		if lower == "transfer-encoding" || lower == "content-length" {
+			continue
+		}
+		for _, v := range values {
+			fmt.Fprintf(writer, "%s: %s\r\n", key, v)
+		}
+	}
+	fmt.Fprintf(writer, "Transfer-Encoding: chunked\r\n")
+	fmt.Fprintf(writer, "\r\n")
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flushing Responses SSE headers: %w", err)
+	}
+
+	interceptor := NewResponsesInterceptor(
+		ch.trapEngine,
+		ch.trapSelector,
+		ch.makeTrapInjectionFunc(),
+		ch.logger,
+	)
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+
+	var currentEvent SSEEvent
+	lineCount := 0
+
+	writeChunk := func(data string) error {
+		chunk := data + "\n"
+		fmt.Fprintf(writer, "%x\r\n%s\r\n", len(chunk), chunk)
+		return nil
+	}
+
+	writeEvent := func(event SSEEvent) error {
+		if event.Event != "" {
+			if err := writeChunk("event: " + event.Event); err != nil {
+				return err
+			}
+		}
+		if event.Data != "" {
+			for _, line := range strings.Split(event.Data, "\n") {
+				if err := writeChunk("data: " + line); err != nil {
+					return err
+				}
+			}
+		}
+		if err := writeChunk(""); err != nil {
+			return err
+		}
+		return writer.Flush()
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		lineCount++
+
+		if lineCount <= 10 || lineCount%50 == 0 {
+			preview := line
+			if len(preview) > 200 {
+				preview = preview[:200]
+			}
+			ch.logger.Debug("Responses SSE line", "n", lineCount, "preview", preview)
+		}
+
+		if line == "" {
+			if currentEvent.Event != "" || currentEvent.Data != "" {
+				outputEvents, procErr := interceptor.ProcessEvent(currentEvent)
+				if procErr != nil {
+					ch.logger.Error("Responses SSE interceptor error", "error", procErr)
+				}
+				for _, outEvent := range outputEvents {
+					if err := writeEvent(outEvent); err != nil {
+						return fmt.Errorf("writing Responses SSE event: %w", err)
+					}
+				}
+				currentEvent = SSEEvent{}
+			} else {
+				if err := writeChunk(""); err != nil {
+					return fmt.Errorf("writing Responses SSE separator: %w", err)
+				}
+				if err := writer.Flush(); err != nil {
+					return fmt.Errorf("flushing Responses SSE separator: %w", err)
+				}
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "event: ") {
+			currentEvent.Event = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			if currentEvent.Data != "" {
+				currentEvent.Data += "\n" + strings.TrimPrefix(line, "data: ")
+			} else {
+				currentEvent.Data = strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}
+
+	if currentEvent.Event != "" || currentEvent.Data != "" {
+		outputEvents, _ := interceptor.ProcessEvent(currentEvent)
+		for _, outEvent := range outputEvents {
+			_ = writeEvent(outEvent)
+		}
+	}
+
+	ch.logger.Debug("Responses SSE stream ended", "total_lines", lineCount, "scan_err", scanner.Err())
+
+	fmt.Fprintf(writer, "0\r\n\r\n")
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flushing Responses SSE terminating chunk: %w", err)
+	}
+
+	return scanner.Err()
+}
+
 // handlePlainTunnel proxies TCP bidirectionally for non-MITM hosts.
 func (ch *ConnectHandler) handlePlainTunnel(conn net.Conn, targetAddr string) {
 	defer func() { _ = conn.Close() }()
@@ -562,7 +692,7 @@ func (ch *ConnectHandler) checkForOAIToolResult(body []byte) {
 		// Check for rejection indicators to distinguish caught vs missed.
 		result := "missed"
 		lower := strings.ToLower(msg.Content)
-		ch.logger.Debug("OAI tool result content", "tool_call_id", activeTrap.ToolUseID, "content", msg.Content)
+		ch.logger.Debug("OAI tool result content", "tool_call_id", activeTrap.ToolUseID, "content_len", len(msg.Content))
 		if strings.Contains(lower, "user denied") ||
 			strings.Contains(lower, "user rejected") ||
 			strings.Contains(lower, "was rejected") ||
@@ -589,5 +719,165 @@ func (ch *ConnectHandler) checkForOAIToolResult(body []byte) {
 
 		ch.callbackHandler.ResolveTrap(activeTrap, result)
 		return
+	}
+}
+
+// checkForResponsesToolResult inspects the request body for OpenAI Responses API
+// format tool results. In the Responses API, tool outputs appear as items with
+// type "function_call_output" and a "call_id" field in the input array.
+func (ch *ConnectHandler) checkForResponsesToolResult(body []byte) {
+	activeTrap := ch.trapEngine.GetActiveTrap()
+	if activeTrap == nil {
+		return
+	}
+
+	// Responses API sends tool results in the input array
+	var request struct {
+		Input json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil || request.Input == nil {
+		return
+	}
+
+	// Input can be an array of items
+	var items []json.RawMessage
+	if err := json.Unmarshal(request.Input, &items); err != nil {
+		return
+	}
+
+	for _, item := range items {
+		var toolOutput struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+			Output string `json:"output"`
+		}
+		if err := json.Unmarshal(item, &toolOutput); err != nil {
+			continue
+		}
+
+		if toolOutput.Type != "function_call_output" || toolOutput.CallID != activeTrap.ToolUseID {
+			continue
+		}
+
+		result := "missed"
+		lower := strings.ToLower(toolOutput.Output)
+		ch.logger.Debug("Responses API tool result content",
+			"tool_call_id", activeTrap.ToolUseID,
+			"output_len", len(toolOutput.Output),
+		)
+		if strings.Contains(lower, "user denied") ||
+			strings.Contains(lower, "user rejected") ||
+			strings.Contains(lower, "was rejected") ||
+			strings.Contains(lower, "doesn't want to proceed") ||
+			strings.Contains(lower, "does not want to proceed") ||
+			strings.Contains(lower, "operation not permitted") ||
+			strings.Contains(lower, "the user denied this operation") ||
+			strings.Contains(lower, "cancelled") ||
+			strings.Contains(lower, "canceled") ||
+			strings.Contains(lower, "skipped") ||
+			strings.Contains(lower, "not executed") ||
+			strings.Contains(lower, "was not run") ||
+			strings.Contains(lower, "user chose") ||
+			strings.Contains(lower, "tool call was aborted") ||
+			toolOutput.Output == "" {
+			result = "caught"
+		}
+
+		ch.logger.Info("Responses API trap result detected",
+			"trap_id", activeTrap.ID,
+			"tool_call_id", activeTrap.ToolUseID,
+			"result", result,
+		)
+
+		ch.callbackHandler.ResolveTrap(activeTrap, result)
+		return
+	}
+}
+
+// checkForAnthropicToolResult inspects the request body for Anthropic Messages API
+// tool results. These appear as messages with role "user" containing content blocks
+// of type "tool_result" with a tool_use_id field.
+func (ch *ConnectHandler) checkForAnthropicToolResult(body []byte) {
+	activeTrap := ch.trapEngine.GetActiveTrap()
+	if activeTrap == nil {
+		return
+	}
+
+	var request struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return
+	}
+
+	for i := len(request.Messages) - 1; i >= 0; i-- {
+		msg := request.Messages[i]
+		if msg.Role != "user" {
+			continue
+		}
+
+		var blocks []json.RawMessage
+		if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+			continue
+		}
+
+		for _, block := range blocks {
+			var toolResult struct {
+				Type      string          `json:"type"`
+				ToolUseID string          `json:"tool_use_id"`
+				Content   json.RawMessage `json:"content"`
+				IsError   bool            `json:"is_error"`
+			}
+			if err := json.Unmarshal(block, &toolResult); err != nil {
+				continue
+			}
+
+			if toolResult.Type != "tool_result" || toolResult.ToolUseID != activeTrap.ToolUseID {
+				continue
+			}
+
+			// Content can be a string or an array of content blocks
+			contentStr := string(toolResult.Content)
+			var plainStr string
+			if json.Unmarshal(toolResult.Content, &plainStr) == nil {
+				contentStr = plainStr
+			}
+
+			result := "missed"
+			lower := strings.ToLower(contentStr)
+			ch.logger.Debug("Anthropic tool result content",
+				"tool_use_id", activeTrap.ToolUseID,
+				"content_len", len(contentStr),
+			)
+			if strings.Contains(lower, "user denied") ||
+				strings.Contains(lower, "user rejected") ||
+				strings.Contains(lower, "was rejected") ||
+				strings.Contains(lower, "doesn't want to proceed") ||
+				strings.Contains(lower, "does not want to proceed") ||
+				strings.Contains(lower, "operation not permitted") ||
+				strings.Contains(lower, "the user denied this operation") ||
+				strings.Contains(lower, "cancelled") ||
+				strings.Contains(lower, "canceled") ||
+				strings.Contains(lower, "skipped") ||
+				strings.Contains(lower, "not executed") ||
+				strings.Contains(lower, "was not run") ||
+				strings.Contains(lower, "user chose") ||
+				strings.Contains(lower, "tool call was aborted") ||
+				contentStr == "" {
+				result = "caught"
+			}
+
+			ch.logger.Info("Anthropic trap result detected",
+				"trap_id", activeTrap.ID,
+				"tool_use_id", activeTrap.ToolUseID,
+				"result", result,
+			)
+
+			ch.callbackHandler.ResolveTrap(activeTrap, result)
+			return
+		}
 	}
 }
