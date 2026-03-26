@@ -573,7 +573,7 @@ func TestRunInit_WithMockedStdin(t *testing.T) {
 	go func() {
 		fmt.Fprintf(w, "%s\n", mockServer.URL)
 		fmt.Fprintf(w, "test-api-token\n")
-		w.Close()
+		_ = w.Close()
 	}()
 
 	err = runInit(nil, nil)
@@ -610,7 +610,7 @@ func TestRunInit_EmptyToken(t *testing.T) {
 	go func() {
 		fmt.Fprintf(w, "\n") // empty dashboard URL (use default)
 		fmt.Fprintf(w, "\n") // empty API token
-		w.Close()
+		_ = w.Close()
 	}()
 
 	err = runInit(nil, nil)
