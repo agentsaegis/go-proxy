@@ -474,7 +474,13 @@ func (ph *ProxyHandler) checkForTrapResult(body []byte) {
 				strings.Contains(lower, "operation not permitted") ||
 				strings.Contains(lower, "the user denied this operation") ||
 				strings.Contains(lower, "cancelled") ||
-				strings.Contains(lower, "canceled") {
+				strings.Contains(lower, "canceled") ||
+				strings.Contains(lower, "skipped") ||
+				strings.Contains(lower, "not executed") ||
+				strings.Contains(lower, "was not run") ||
+				strings.Contains(lower, "user chose") ||
+				strings.Contains(lower, "tool call was aborted") ||
+				contentStr == "" {
 				result = "caught"
 			}
 
