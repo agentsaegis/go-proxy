@@ -427,6 +427,7 @@ func (ch *ConnectHandler) checkForOAIToolResult(body []byte) {
 		// Check for rejection indicators to distinguish caught vs missed.
 		result := "missed"
 		lower := strings.ToLower(msg.Content)
+		ch.logger.Debug("OAI tool result content", "tool_call_id", activeTrap.ToolUseID, "content", msg.Content)
 		if strings.Contains(lower, "user denied") ||
 			strings.Contains(lower, "user rejected") ||
 			strings.Contains(lower, "was rejected") ||
@@ -435,7 +436,13 @@ func (ch *ConnectHandler) checkForOAIToolResult(body []byte) {
 			strings.Contains(lower, "operation not permitted") ||
 			strings.Contains(lower, "the user denied this operation") ||
 			strings.Contains(lower, "cancelled") ||
-			strings.Contains(lower, "canceled") {
+			strings.Contains(lower, "canceled") ||
+			strings.Contains(lower, "skipped") ||
+			strings.Contains(lower, "not executed") ||
+			strings.Contains(lower, "was not run") ||
+			strings.Contains(lower, "user chose") ||
+			strings.Contains(lower, "tool call was aborted") ||
+			msg.Content == "" {
 			result = "caught"
 		}
 
