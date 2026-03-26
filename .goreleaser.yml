@@ -33,7 +33,7 @@ brews:
     directory: Formula
     homepage: https://github.com/agentsaegis/go-proxy
     description: "Security awareness proxy for AI coding tools"
-    license: "MIT"
+    license: "AGPL-3.0"
     test: |
       system "#{bin}/agentsaegis", "--version"
 
