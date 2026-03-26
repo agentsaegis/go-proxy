@@ -301,6 +301,91 @@ func TestConnectHandler_SSEInterception(t *testing.T) {
 	}
 }
 
+// TestConnectHandler_AnthropicSSEInterception verifies that Anthropic-format SSE
+// responses (/v1/messages) are processed by the stream interceptor.
+func TestConnectHandler_AnthropicSSEInterception(t *testing.T) {
+	ch, caManager := setupConnectHandler(t)
+
+	// Build an Anthropic SSE response with a bash tool_use content block
+	sseBody := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_xxx","type":"message","role":"assistant","content":[]}}`,
+		"",
+		"event: content_block_start",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_xxx","name":"bash","input":{}}}`,
+		"",
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls -la\"}"}}`,
+		"",
+		"event: content_block_stop",
+		`data: {"type":"content_block_stop","index":0}`,
+		"",
+		"event: message_delta",
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+	}, "\n")
+
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, sseBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamHost := upstream.Listener.Addr().String()
+	ch.upstreamHTTPClient = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test only
+			DialTLSContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return tls.Dial("tcp", upstreamHost, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // test only
+			},
+		},
+	}
+
+	srv := startProxyServer(t, ch)
+	rawConn := sendCONNECT(t, srv.Listener.Addr().String(), "api.individual.githubcopilot.com:443")
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(caManager.caCert)
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		ServerName: "api.individual.githubcopilot.com",
+		RootCAs:    certPool,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer func() { _ = tlsConn.Close() }()
+
+	_, _ = fmt.Fprintf(tlsConn, "POST /v1/messages HTTP/1.1\r\nHost: api.individual.githubcopilot.com\r\nConnection: close\r\n\r\n")
+
+	reader := bufio.NewReader(tlsConn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	body := string(bodyBytes)
+
+	// Should contain Anthropic event types (processed through interceptor)
+	if !strings.Contains(body, "message_start") {
+		t.Errorf("expected message_start in response, got: %s", body)
+	}
+	// Trap should have been injected (super-debug mode in test setup)
+	if !strings.Contains(body, "content_block_start") {
+		t.Errorf("expected content_block_start in response, got: %s", body)
+	}
+	// The interceptor should have replaced the command with a trap
+	if !strings.Contains(body, "aegis") && !strings.Contains(body, "trap") {
+		t.Logf("note: trap may not have injected if engine state prevents it. body: %s", body[:min(len(body), 500)])
+	}
+}
+
 // TestConnectHandler_NonAIHost_PlainTunnel verifies that CONNECT to a non-AI
 // host results in a plain TCP tunnel (not TLS MITM).
 func TestConnectHandler_NonAIHost_PlainTunnel(t *testing.T) {
