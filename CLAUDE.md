@@ -145,6 +145,10 @@ internal/
 
 e2e/
   e2e_test.go            # End-to-end tests (build tag: e2e) - mock Anthropic + dashboard servers
+  live_test.go           # Live E2E tests (build tag: live) - TestMain, matrix runner, result tracker
+  live_claude_test.go    # Live Claude CLI scenarios - Anthropic SSE format through reverse proxy
+  live_copilot_test.go   # Live Copilot scenarios - OpenAI SSE format through CONNECT tunnel
+  live_helpers_test.go   # Live test helpers - proxy subprocess, token exchange, SSE parsers
 
 install.sh               # Curl-pipe installer script - detects OS/arch, downloads release, verifies checksum
 
@@ -382,6 +386,14 @@ make test-e2e
 # Equivalent: go test -race -tags e2e -v -count=1 ./e2e/...
 ```
 
+### Run live E2E tests (real API calls)
+```bash
+make test-live
+# Requires: ANTHROPIC_API_KEY, AEGIS_API_TOKEN
+# Optional: GITHUB_TOKEN (for Copilot tests)
+# Equivalent: go test -race -tags live -v -count=1 -timeout 10m ./e2e/...
+```
+
 ### Lint
 ```bash
 make lint
@@ -437,6 +449,7 @@ GoReleaser builds binaries for darwin/linux amd64/arm64, creates GitHub Release,
 
 - **Unit tests:** Every `*.go` file has a corresponding `*_test.go` in the same package
 - **E2E tests:** `e2e/e2e_test.go` with build tag `e2e` (not included in `make test`)
+- **Live E2E tests:** `e2e/live_*.go` with build tag `live` (real API calls through external binary)
 - **Framework:** Standard `testing` package only, no external test framework
 - **Coverage target:** 90% (enforced by Codecov)
 - **Test pattern:** Table-driven tests, `t.TempDir()` for filesystem tests, `httptest.NewServer` for HTTP mocking, `t.Setenv()` for env vars
