@@ -1,4 +1,4 @@
-.PHONY: lint test test-e2e build clean
+.PHONY: lint test test-e2e build clean qa qa-live qa-docker qa-docker-claude qa-docker-copilot
 
 lint:
 	go vet ./...
@@ -14,3 +14,18 @@ build:
 
 clean:
 	rm -rf bin coverage.out
+
+qa: build
+	bash scripts/qa.sh
+
+qa-live: build
+	bash scripts/qa-live.sh
+
+qa-docker:
+	bash scripts/qa-docker.sh --all
+
+qa-docker-claude:
+	bash scripts/qa-docker.sh --claude
+
+qa-docker-copilot:
+	bash scripts/qa-docker.sh --copilot

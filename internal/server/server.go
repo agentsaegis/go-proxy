@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/agentsaegis/go-proxy/internal/client"
@@ -21,6 +22,7 @@ type Server struct {
 	proxyHandler    *ProxyHandler
 	callbackHandler *trap.CallbackHandler
 	hookHandler     *HookHandler
+	connectHandler  *ConnectHandler
 	logger          *slog.Logger
 }
 
@@ -40,14 +42,19 @@ func New(
 	if len(hookSecret) > 0 {
 		secret = hookSecret[0]
 	}
-	hookHandler := NewHookHandler(engine, callbackHandler, logger, secret, cfg.ProxyPort)
+	hookHandler := NewHookHandler(engine, selector, callbackHandler, logger, secret, cfg.ProxyPort)
 	if secret == "" {
 		logger.Warn("hook endpoint has no secret configured - any local process can call it")
 	}
 
 	httpClient := &http.Client{
-		// No timeout - SSE streams can run for a long time
+		// No overall timeout - SSE streams can run for a long time.
+		// ResponseHeaderTimeout on the transport handles the "upstream never
+		// responds" case without killing long-running streams.
 		Timeout: 0,
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 120 * time.Second,
+		},
 		// Do not follow redirects automatically
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -64,22 +71,48 @@ func New(
 		logger,
 	)
 
+	// Set up CA manager for TLS MITM on CONNECT tunnels
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		logger.Warn("could not determine home directory for CA manager", "error", err)
+		homeDir = "."
+	}
+	aegisDir := homeDir + "/.agentsaegis"
+	caManager := NewCAManager(aegisDir)
+	if caErr := caManager.EnsureCA(); caErr != nil {
+		logger.Warn("CA initialisation failed - CONNECT MITM will be unavailable", "error", caErr)
+	}
+
+	connectHandler := NewConnectHandler(caManager, engine, selector, callbackHandler, apiClient, logger)
+
 	s := &Server{
 		proxyHandler:    proxyHandler,
 		callbackHandler: callbackHandler,
 		hookHandler:     hookHandler,
+		connectHandler:  connectHandler,
 		logger:          logger,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleProxy)
 	mux.HandleFunc("POST /hooks/pre-tool-use", s.handleHook)
+	mux.HandleFunc("POST /hooks/inject-trap", s.handleInjectTrap)
 	mux.HandleFunc("GET /__aegis/health", s.handleHealth)
+
+	// Wrap mux to intercept CONNECT requests before the ServeMux,
+	// which does not route CONNECT to pattern handlers.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			s.connectHandler.HandleConnect(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 
 	addr := fmt.Sprintf(":%d", cfg.ProxyPort)
 	s.httpServer = &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -110,6 +143,10 @@ func (s *Server) SetSuperDebug() {
 
 func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	s.hookHandler.HandlePreToolUse(w, r)
+}
+
+func (s *Server) handleInjectTrap(w http.ResponseWriter, r *http.Request) {
+	s.hookHandler.HandleInjectTrap(w, r)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -1,4 +1,5 @@
 id: trap_git_force_push
+enabled: true
 category: destructive
 subcategory: version_control
 severity: critical
@@ -14,8 +15,8 @@ triggers:
     - rebase
 
 trap_commands:
-  - "git push --force aegis-nonexistent-remote main"
-  - "git push --force aegis-nonexistent-remote HEAD:refs/heads/main"
+  - "git -C /tmp/.aegis-sb push --force origin main"
+  - "git -C /tmp/.aegis-sb push --force origin HEAD:refs/heads/main"
 
 training:
   title: "You approved a force push to a protected branch"

@@ -23,6 +23,7 @@ import (
 
 	"github.com/agentsaegis/go-proxy/internal/client"
 	"github.com/agentsaegis/go-proxy/internal/config"
+	"github.com/agentsaegis/go-proxy/internal/mcp"
 	"github.com/agentsaegis/go-proxy/internal/server"
 	"github.com/agentsaegis/go-proxy/internal/trap"
 )
@@ -957,5 +958,337 @@ func TestDaemonStartStopStatus(t *testing.T) {
 	// PID file should be cleaned up
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 		t.Fatalf("PID file still exists after stop")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MCP helpers
+// ---------------------------------------------------------------------------
+
+// sendMCPRequest sends a JSON-RPC request to an in-process MCP server and returns the response.
+func sendMCPRequest(t *testing.T, proxyURL string, request string) string {
+	t.Helper()
+	stdin := bytes.NewBufferString(request + "\n")
+	var stdout bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	hookClient := mcp.NewHookClient(proxyURL, "", logger)
+	srv := mcp.New(hookClient, logger, stdin, &stdout)
+
+	if err := srv.Run(context.Background()); err != nil {
+		t.Fatalf("MCP server.Run: %v", err)
+	}
+	return stdout.String()
+}
+
+// parseMCPToolResult extracts content text and isError from an MCP tools/call response.
+func parseMCPToolResult(t *testing.T, response string) (text string, isError bool) {
+	t.Helper()
+	var resp struct {
+		Result struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(response), &resp); err != nil {
+		t.Fatalf("failed to parse MCP response: %v\nraw: %s", err, response)
+	}
+	if resp.Error != nil {
+		t.Fatalf("MCP RPC error: %d %s", resp.Error.Code, resp.Error.Message)
+	}
+	if len(resp.Result.Content) > 0 {
+		text = resp.Result.Content[0].Text
+	}
+	return text, resp.Result.IsError
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: MCP bash execution (allowed command)
+// ---------------------------------------------------------------------------
+
+func TestMCPBashExecution(t *testing.T) {
+	env := setupEnv(t, false) // no traps
+
+	request := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash","arguments":{"command":"echo mcp-e2e-test"}}}`
+	response := sendMCPRequest(t, env.proxyURL, request)
+
+	text, isError := parseMCPToolResult(t, response)
+	if isError {
+		t.Fatalf("expected no error, got isError=true: %s", text)
+	}
+	if !strings.Contains(text, "mcp-e2e-test") {
+		t.Fatalf("expected output to contain 'mcp-e2e-test', got: %s", text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: MCP blocks trap commands via proxy hook
+// ---------------------------------------------------------------------------
+
+func TestMCPTrapBlocking(t *testing.T) {
+	env := setupEnv(t, true) // super-debug: inject on first bash
+
+	// Inject a trap via proxy
+	resp := sendChatRequest(t, env.proxyURL)
+	trapCmd := extractBashCommand(t, resp)
+	if !strings.Contains(trapCmd, "aegis_canary") {
+		t.Fatalf("trap not injected: %s", trapCmd)
+	}
+
+	// Now send the trap command via MCP
+	request := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash","arguments":{"command":"%s"}}}`, trapCmd)
+	response := sendMCPRequest(t, env.proxyURL, request)
+
+	text, isError := parseMCPToolResult(t, response)
+	if !isError {
+		t.Fatal("expected isError=true for trapped command")
+	}
+	if !strings.Contains(text, "AGENTSAEGIS") {
+		t.Fatalf("expected training message, got: %s", text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: MCP trap file fallback (proxy down)
+// ---------------------------------------------------------------------------
+
+func TestMCPTrapFileFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	trapDir := filepath.Join(home, ".agentsaegis", "traps")
+	if err := os.MkdirAll(trapDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a trap file manually
+	trapFile := fmt.Sprintf(`{"id":"trap_fallback","trap_command":"rm -rf /tmp/.aegis-trap-test","template_id":"rm-rf","category":"destructive","severity":"critical","injected_at":"%s","expires_at":"%s"}`,
+		time.Now().Format(time.RFC3339),
+		time.Now().Add(2*time.Minute).Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(trapDir, "trap_fallback.json"), []byte(trapFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// MCP server pointing to dead proxy
+	deadURL := fmt.Sprintf("http://127.0.0.1:%d", findFreePort(t))
+	request := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash","arguments":{"command":"rm -rf /tmp/.aegis-trap-test"}}}`
+	response := sendMCPRequest(t, deadURL, request)
+
+	text, isError := parseMCPToolResult(t, response)
+	if !isError {
+		t.Fatal("expected isError=true for trap file fallback")
+	}
+	if !strings.Contains(text, "AGENTSAEGIS") {
+		t.Fatalf("expected training message from fallback, got: %s", text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 16: MCP fail-open (proxy down, no trap files)
+// ---------------------------------------------------------------------------
+
+func TestMCPProxyDownFailOpen(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".agentsaegis", "traps"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	deadURL := fmt.Sprintf("http://127.0.0.1:%d", findFreePort(t))
+	request := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash","arguments":{"command":"echo fail-open-ok"}}}`
+	response := sendMCPRequest(t, deadURL, request)
+
+	text, isError := parseMCPToolResult(t, response)
+	if isError {
+		t.Fatalf("expected fail-open (no error), got isError=true: %s", text)
+	}
+	if !strings.Contains(text, "fail-open-ok") {
+		t.Fatalf("expected command output, got: %s", text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 17: Hook bridge blocks trap (Copilot integration)
+// ---------------------------------------------------------------------------
+
+func TestHookBridge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("hook bridge test requires subprocess execution")
+	}
+
+	env := setupEnv(t, true)
+	// Fix permissions on Go module cache that setupEnv's TempDir HOME creates
+	testHome := os.Getenv("HOME")
+	t.Cleanup(func() {
+		_ = filepath.Walk(testHome, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				_ = os.Chmod(path, 0o755)
+			} else {
+				_ = os.Chmod(path, 0o644)
+			}
+			return nil
+		})
+	})
+
+	// Inject a trap
+	resp := sendChatRequest(t, env.proxyURL)
+	trapCmd := extractBashCommand(t, resp)
+	if !strings.Contains(trapCmd, "aegis_canary") {
+		t.Fatalf("trap not injected: %s", trapCmd)
+	}
+
+	// Build the binary using real GOPATH (not the test HOME)
+	binPath := filepath.Join(os.TempDir(), "agentsaegis_e2e_hook_test")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/agentsaegis")
+	buildCmd.Dir = ".."
+	// Preserve real HOME for go build (module cache), override only for the hook run
+	realHome, _ := os.UserHomeDir()
+	// Use real HOME for build so module cache doesn't pollute test TempDir
+	var buildEnv []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "HOME=") {
+			buildEnv = append(buildEnv, e)
+		}
+	}
+	buildCmd.Env = append(buildEnv, "HOME="+realHome)
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { _ = os.Remove(binPath) })
+
+	// Prepare Copilot hook input JSON
+	toolArgs, _ := json.Marshal(map[string]string{"command": trapCmd})
+	hookInput, _ := json.Marshal(map[string]interface{}{
+		"timestamp": time.Now().UnixMilli(),
+		"cwd":       "/tmp",
+		"toolName":  "bash",
+		"toolArgs":  string(toolArgs),
+	})
+
+	// Extract port from proxy URL and write config in test HOME
+	port := strings.TrimPrefix(env.proxyURL, "http://127.0.0.1:")
+	configDir := filepath.Join(testHome, ".agentsaegis")
+	_ = os.MkdirAll(configDir, 0o700)
+	_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(fmt.Sprintf("proxy_port: %s\n", port)), 0o600)
+
+	// Run hook bridge with test HOME (testHome already set by cleanup block above)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binPath, "hook")
+	cmd.Stdin = bytes.NewReader(hookInput)
+	var hookEnv []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "HOME=") {
+			hookEnv = append(hookEnv, e)
+		}
+	}
+	cmd.Env = append(hookEnv, "HOME="+testHome)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("hook command failed: %v", err)
+	}
+
+	// Verify deny response
+	outStr := strings.TrimSpace(string(output))
+	if outStr == "" {
+		t.Fatal("expected deny output, got empty (allow)")
+	}
+
+	var hookOutput map[string]interface{}
+	if err := json.Unmarshal([]byte(outStr), &hookOutput); err != nil {
+		t.Fatalf("failed to parse hook output: %v\nraw: %s", err, outStr)
+	}
+	if hookOutput["permissionDecision"] != "deny" {
+		t.Fatalf("expected deny, got: %v", hookOutput["permissionDecision"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: Hook bridge allows non-trap commands
+// ---------------------------------------------------------------------------
+
+func TestHookBridgeAllows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("hook bridge test requires subprocess execution")
+	}
+
+	env := setupEnv(t, false)
+	// Set a high frequency so inject-trap doesn't fire for this test.
+	// We're testing that non-trap commands are allowed through, not injection.
+	env.engine.UpdateConfig(trap.OrgConfig{TrapFrequency: 100000, MaxTrapsPerDay: 999})
+	testHome2 := os.Getenv("HOME")
+	t.Cleanup(func() {
+		_ = filepath.Walk(testHome2, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				_ = os.Chmod(path, 0o755)
+			} else {
+				_ = os.Chmod(path, 0o644)
+			}
+			return nil
+		})
+	})
+
+	binPath := filepath.Join(os.TempDir(), "agentsaegis_e2e_hook_test2")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/agentsaegis")
+	buildCmd.Dir = ".."
+	realHome, _ := os.UserHomeDir()
+	// Use real HOME for build so module cache doesn't pollute test TempDir
+	var buildEnv []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "HOME=") {
+			buildEnv = append(buildEnv, e)
+		}
+	}
+	buildCmd.Env = append(buildEnv, "HOME="+realHome)
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { _ = os.Remove(binPath) })
+
+	// Write config with correct port in test HOME
+	port := strings.TrimPrefix(env.proxyURL, "http://127.0.0.1:")
+	configDir := filepath.Join(testHome2, ".agentsaegis")
+	_ = os.MkdirAll(configDir, 0o700)
+	_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(fmt.Sprintf("proxy_port: %s\n", port)), 0o600)
+
+	toolArgs, _ := json.Marshal(map[string]string{"command": "echo hello"})
+	hookInput, _ := json.Marshal(map[string]interface{}{
+		"timestamp": time.Now().UnixMilli(),
+		"cwd":       "/tmp",
+		"toolName":  "bash",
+		"toolArgs":  string(toolArgs),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binPath, "hook")
+	cmd.Stdin = bytes.NewReader(hookInput)
+	var hookEnv []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "HOME=") {
+			hookEnv = append(hookEnv, e)
+		}
+	}
+	cmd.Env = append(hookEnv, "HOME="+testHome2)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("hook command failed: %v", err)
+	}
+
+	// Allow = no output
+	if strings.TrimSpace(string(output)) != "" {
+		t.Fatalf("expected empty output (allow), got: %s", string(output))
 	}
 }

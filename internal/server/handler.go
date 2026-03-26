@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/agentsaegis/go-proxy/internal/client"
@@ -79,6 +81,11 @@ func (ph *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := ph.httpClient.Do(upstreamReq)
 	if err != nil {
+		if isTimeoutError(err) {
+			ph.logger.Error("upstream request timed out", "error", err)
+			http.Error(w, "proxy error: upstream timeout", http.StatusGatewayTimeout)
+			return
+		}
 		ph.logger.Error("upstream request failed", "error", err)
 		http.Error(w, "proxy error: upstream request failed", http.StatusBadGateway)
 		return
@@ -152,9 +159,25 @@ func (ph *ProxyHandler) handleSSEResponse(ctx context.Context, w http.ResponseWr
 	w.WriteHeader(resp.StatusCode)
 	flusher.Flush()
 
+	if err := ph.processSSEStream(ctx, w, flusher, resp.Body); err != nil {
+		ph.logger.Error("SSE processing failed, passing through remainder", "error", err)
+		ph.drainSSEPassthrough(w, flusher, resp.Body)
+	}
+}
+
+// processSSEStream runs the SSE interceptor loop with panic recovery.
+// If the interceptor panics, it returns an error so the caller can fall back
+// to raw passthrough of remaining upstream data.
+func (ph *ProxyHandler) processSSEStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, body io.Reader) (retErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("panic in SSE interceptor: %v", r)
+		}
+	}()
+
 	interceptor := NewStreamInterceptor(ph.trapEngine, ph.trapSelector, ph.makeTrapInjectionFunc(), ph.logger)
 
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(body)
 	// Increase scanner buffer for large SSE payloads
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 
@@ -166,7 +189,7 @@ func (ph *ProxyHandler) handleSSEResponse(ctx context.Context, w http.ResponseWr
 		// Check if the client has disconnected
 		if ctx.Err() != nil {
 			ph.logger.Debug("client disconnected during SSE stream")
-			return
+			return nil
 		}
 
 		line := scanner.Text()
@@ -212,6 +235,19 @@ func (ph *ProxyHandler) handleSSEResponse(ctx context.Context, w http.ResponseWr
 	if err := scanner.Err(); err != nil {
 		ph.logger.Error("error reading SSE stream", "error", err)
 	}
+
+	return nil
+}
+
+// drainSSEPassthrough copies remaining upstream SSE data through to the client
+// without any interception. Used as fallback when processSSEStream fails.
+func (ph *ProxyHandler) drainSSEPassthrough(w http.ResponseWriter, flusher http.Flusher, body io.Reader) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+	for scanner.Scan() {
+		fmt.Fprintln(w, scanner.Text())
+	}
+	flusher.Flush()
 }
 
 func (ph *ProxyHandler) handleJSONResponse(w http.ResponseWriter, resp *http.Response) {
@@ -231,7 +267,7 @@ func (ph *ProxyHandler) handleJSONResponse(w http.ResponseWriter, resp *http.Res
 
 	// Try to detect and inject trap in non-streaming JSON responses
 	ph.logger.Debug("JSON response", "body_len", len(body))
-	modifiedBody := ph.maybeInjectTrapInJSON(body)
+	modifiedBody := ph.safeInjectTrapInJSON(body)
 
 	// Update Content-Length if body was modified
 	if len(modifiedBody) != len(body) {
@@ -436,7 +472,9 @@ func (ph *ProxyHandler) checkForTrapResult(body []byte) {
 				strings.Contains(lower, "doesn't want to proceed") ||
 				strings.Contains(lower, "does not want to proceed") ||
 				strings.Contains(lower, "operation not permitted") ||
-				strings.Contains(lower, "the user denied this operation") {
+				strings.Contains(lower, "the user denied this operation") ||
+				strings.Contains(lower, "cancelled") ||
+				strings.Contains(lower, "canceled") {
 				result = "caught"
 			}
 
@@ -450,6 +488,27 @@ func (ph *ProxyHandler) checkForTrapResult(body []byte) {
 			return
 		}
 	}
+}
+
+// safeInjectTrapInJSON wraps maybeInjectTrapInJSON with panic recovery.
+// On any panic, the original body is returned unchanged (fail-open).
+func (ph *ProxyHandler) safeInjectTrapInJSON(body []byte) (result []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			ph.logger.Error("panic in JSON trap injection, returning original body", "panic", r)
+			result = body
+		}
+	}()
+	return ph.maybeInjectTrapInJSON(body)
+}
+
+// isTimeoutError checks if an error is a timeout from the upstream HTTP request.
+func isTimeoutError(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Timeout()
+	}
+	return false
 }
 
 func (ph *ProxyHandler) writeSSEEvent(w http.ResponseWriter, event SSEEvent) {

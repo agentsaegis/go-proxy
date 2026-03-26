@@ -20,6 +20,7 @@ var TrapsFS embed.FS
 // Template represents a single trap template loaded from YAML.
 type Template struct {
 	ID           string   `yaml:"id"`
+	Enabled      *bool    `yaml:"enabled,omitempty"`
 	Category     string   `yaml:"category"`
 	Subcategory  string   `yaml:"subcategory"`
 	Severity     string   `yaml:"severity"`
@@ -95,6 +96,11 @@ func LoadTemplatesFromFS(fsys fs.FS, root string) ([]*Template, error) {
 			return validateErr
 		}
 
+		// Skip disabled templates (default is enabled if field is missing)
+		if t.Enabled != nil && !*t.Enabled {
+			return nil
+		}
+
 		templates = append(templates, &t)
 		return nil
 	})
@@ -149,7 +155,7 @@ var unsafeChecks = []struct {
 			if strings.Contains(cmd, "aws s3") || strings.Contains(cmd, "docker") {
 				return false
 			}
-			// Check each non-flag argument after rm - all must be absolute paths
+			// Check each non-flag argument after rm - all must be under sandbox
 			parts := strings.Fields(cmd)
 			pastRm := false
 			for _, p := range parts {
@@ -160,12 +166,10 @@ var unsafeChecks = []struct {
 				if !pastRm {
 					continue
 				}
-				// Skip flags
 				if strings.HasPrefix(p, "-") {
 					continue
 				}
-				// Every target must be an absolute path under /tmp/.aegis-trap
-				if !strings.HasPrefix(p, "/tmp/.aegis-trap") {
+				if !strings.HasPrefix(p, "/tmp/.aegis-") {
 					return true
 				}
 			}
@@ -173,12 +177,16 @@ var unsafeChecks = []struct {
 		},
 	},
 	{
-		"git push without fake remote",
+		"git push without sandbox -C",
 		func(cmd string) bool {
-			if !strings.Contains(cmd, "git push") {
+			if !strings.Contains(cmd, "git push") && !strings.Contains(cmd, "git -C") {
 				return false
 			}
-			return !strings.Contains(cmd, "aegis-nonexistent-remote")
+			if !strings.Contains(cmd, "push") {
+				return false
+			}
+			// Must use -C to sandbox dir or target a nonexistent remote
+			return !strings.Contains(cmd, "-C /tmp/.aegis-") && !strings.Contains(cmd, "aegis-nonexistent-remote")
 		},
 	},
 	{
@@ -187,7 +195,7 @@ var unsafeChecks = []struct {
 			if !strings.Contains(cmd, "chmod") {
 				return false
 			}
-			if strings.Contains(cmd, "/tmp/.aegis-trap") {
+			if strings.Contains(cmd, "/tmp/.aegis-") {
 				return false
 			}
 			for _, danger := range []string{" .", " /", " ~"} {
@@ -199,109 +207,52 @@ var unsafeChecks = []struct {
 		},
 	},
 	{
-		"curl/nc to real domains",
+		"curl/nc to non-owned domains",
 		func(cmd string) bool {
 			hasCurl := strings.Contains(cmd, "curl")
 			hasNc := strings.Contains(cmd, " nc ") || strings.Contains(cmd, "|nc ") || strings.HasSuffix(cmd, " nc")
 			if !hasCurl && !hasNc {
 				return false
 			}
-			// Check for real domains in curl/nc commands
+			// Owned domains allowed for curl/nc
+			ownedHosts := []string{"0.0.0.0", "artifact-zone.com", "networkwarmup.com"}
 			if hasCurl && (strings.Contains(cmd, "https://") || strings.Contains(cmd, "http://")) {
-				// Check each URL - only allow URLs whose host is 0.0.0.0
 				for _, part := range strings.Fields(cmd) {
 					if !strings.HasPrefix(part, "http://") && !strings.HasPrefix(part, "https://") {
 						continue
 					}
-					// Extract host from URL: strip scheme, take up to first / or :port
 					hostPart := part
 					hostPart = strings.TrimPrefix(hostPart, "https://")
 					hostPart = strings.TrimPrefix(hostPart, "http://")
-					// Remove path
 					if idx := strings.Index(hostPart, "/"); idx >= 0 {
 						hostPart = hostPart[:idx]
 					}
-					// Remove port
 					if idx := strings.Index(hostPart, ":"); idx >= 0 {
 						hostPart = hostPart[:idx]
 					}
-					if hostPart != "0.0.0.0" {
+					allowed := false
+					for _, h := range ownedHosts {
+						if hostPart == h {
+							allowed = true
+							break
+						}
+					}
+					if !allowed {
 						return true
 					}
 				}
 			}
-			if hasNc && (!strings.Contains(cmd, "0.0.0.0") || !strings.Contains(cmd, "/nonexistent/")) {
-				// nc must have BOTH safe destination (0.0.0.0) AND safe source (/nonexistent/)
-				return true
-			}
-			return false
-		},
-	},
-	{
-		"npm/pip install without aegis-trap prefix",
-		func(cmd string) bool {
-			isNpmInstall := strings.Contains(cmd, "npm install") || strings.Contains(cmd, "npm add") || strings.Contains(cmd, "yarn add") || strings.Contains(cmd, "pnpm add")
-			isPipInstall := strings.Contains(cmd, "pip install") || strings.Contains(cmd, "pip3 install")
-			if !isNpmInstall && !isPipInstall {
-				return false
-			}
-			return !strings.Contains(cmd, "aegis-trap-nonexistent") && !strings.Contains(cmd, "@aegis-trap-nonexistent")
-		},
-	},
-	{
-		"docker with real images or root mount",
-		func(cmd string) bool {
-			if !strings.Contains(cmd, "docker") {
-				return false
-			}
-			// docker run -v /:/mnt (mounting root)
-			if strings.Contains(cmd, "-v /:/mnt") || strings.Contains(cmd, "-v /:/") {
-				return true
-			}
-			// docker compose without nonexistent compose file
-			if strings.Contains(cmd, "docker compose") && !strings.Contains(cmd, "/nonexistent/") && !strings.Contains(cmd, "aegis-trap") {
-				return true
-			}
-			// docker system prune without filter
-			if strings.Contains(cmd, "docker system prune") && !strings.Contains(cmd, "aegis-trap") {
-				return true
-			}
-			// docker run with real images (not aegis-trap .invalid or nonexistent)
-			if strings.Contains(cmd, "docker run") && !strings.Contains(cmd, "aegis-trap") {
-				return true
-			}
-			return false
-		},
-	},
-	{
-		"database reset without nonexistent schema",
-		func(cmd string) bool {
-			if !strings.Contains(cmd, "prisma") && !strings.Contains(cmd, "db:reset") {
-				return false
-			}
-			if strings.Contains(cmd, "--force") || strings.Contains(cmd, "--reset") {
-				return !strings.Contains(cmd, "/nonexistent/")
-			}
-			return false
-		},
-	},
-	{
-		"git add without --dry-run",
-		func(cmd string) bool {
-			if !strings.Contains(cmd, "git add") {
-				return false
-			}
-			return !strings.Contains(cmd, "--dry-run")
-		},
-	},
-	{
-		"env/printenv piped to network command",
-		func(cmd string) bool {
-			// Bare env/printenv at start of command or after pipe reads all real secrets
-			// Only match standalone "env" not ".env" filenames
-			parts := strings.Fields(cmd)
-			for _, p := range parts {
-				if (p == "env" || p == "printenv") {
+			if hasNc {
+				// nc must target owned host AND read from sandbox
+				hostOk := false
+				for _, h := range ownedHosts {
+					if strings.Contains(cmd, h) {
+						hostOk = true
+						break
+					}
+				}
+				srcOk := strings.Contains(cmd, "/tmp/.aegis-") || strings.Contains(cmd, "/nonexistent/")
+				if !hostOk || !srcOk {
 					return true
 				}
 			}
@@ -309,29 +260,122 @@ var unsafeChecks = []struct {
 		},
 	},
 	{
-		"echo/node exposing real env vars",
+		"npm/pip install of non-owned packages",
 		func(cmd string) bool {
-			if !strings.Contains(cmd, "echo") && !strings.Contains(cmd, "node -e") {
+			isNpmInstall := strings.Contains(cmd, "npm install") || strings.Contains(cmd, "npm add") || strings.Contains(cmd, "yarn add") || strings.Contains(cmd, "pnpm add")
+			isPipInstall := strings.Contains(cmd, "pip install") || strings.Contains(cmd, "pip3 install")
+			if !isNpmInstall && !isPipInstall {
 				return false
 			}
-			// Check for real env var names (not AEGIS_TRAP_ prefixed)
-			if strings.Contains(cmd, "$DATABASE_URL") || strings.Contains(cmd, "$API_KEY") || strings.Contains(cmd, "process.env)") || strings.Contains(cmd, "process.env,") {
+			// Allow owned packages and legacy nonexistent packages
+			return !strings.Contains(cmd, "@agentsaegis/") &&
+				!strings.Contains(cmd, "agentsaegis-") &&
+				!strings.Contains(cmd, "agentsaegis/") &&
+				!strings.Contains(cmd, "aegis-trap-nonexistent") &&
+				!strings.Contains(cmd, "@aegis-trap-nonexistent")
+		},
+	},
+	{
+		"docker with non-owned images or root mount",
+		func(cmd string) bool {
+			if !strings.Contains(cmd, "docker") {
+				return false
+			}
+			// docker run -v /:/mnt (mounting real root filesystem)
+			if strings.Contains(cmd, "-v /:/") {
 				return true
 			}
-			// Double-quoted echo with $ expansion is unsafe (single-quoted is safe)
-			if strings.Contains(cmd, "echo") && strings.Contains(cmd, "\"$") {
+			// docker compose must use sandbox compose file
+			if strings.Contains(cmd, "docker compose") && !strings.Contains(cmd, "/tmp/.aegis-") && !strings.Contains(cmd, "/nonexistent/") {
+				return true
+			}
+			// docker system prune must filter to our label
+			if strings.Contains(cmd, "docker system prune") && !strings.Contains(cmd, "agentsaegis-trap") && !strings.Contains(cmd, "aegis-trap") {
+				return true
+			}
+			// docker run must use our registry or known-safe images
+			if strings.Contains(cmd, "docker run") && !strings.Contains(cmd, "ghcr.io/agentsaegis/") && !strings.Contains(cmd, "aegis-trap") {
 				return true
 			}
 			return false
 		},
 	},
 	{
-		"aws with real bucket names",
+		"database reset without sandbox schema",
+		func(cmd string) bool {
+			if !strings.Contains(cmd, "prisma") && !strings.Contains(cmd, "db:reset") {
+				return false
+			}
+			if strings.Contains(cmd, "--force") || strings.Contains(cmd, "--reset") {
+				return !strings.Contains(cmd, "/tmp/.aegis-") && !strings.Contains(cmd, "/nonexistent/")
+			}
+			return false
+		},
+	},
+	{
+		"git add without sandbox -C",
+		func(cmd string) bool {
+			if !strings.Contains(cmd, "git add") && !strings.Contains(cmd, "git -C") {
+				return false
+			}
+			if !strings.Contains(cmd, "add") {
+				return false
+			}
+			// Must use -C to sandbox dir or --dry-run
+			return !strings.Contains(cmd, "-C /tmp/.aegis-") && !strings.Contains(cmd, "--dry-run")
+		},
+	},
+	{
+		"env/printenv piped to network command",
+		func(cmd string) bool {
+			// Bare env/printenv reads all real secrets
+			parts := strings.Fields(cmd)
+			for _, p := range parts {
+				if p == "env" || p == "printenv" {
+					return true
+				}
+			}
+			return false
+		},
+	},
+	{
+		"echo/node exposing real env vars via expansion",
+		func(cmd string) bool {
+			if !strings.Contains(cmd, "echo") && !strings.Contains(cmd, "node -e") {
+				return false
+			}
+			// Single-quoted echo is safe (no shell expansion)
+			// Check if $VAR appears inside double quotes (would expand)
+			if strings.Contains(cmd, "echo") {
+				inDQ := false
+				for i, ch := range cmd {
+					if ch == '\'' && !inDQ {
+						// Skip single-quoted section entirely
+						end := strings.IndexRune(cmd[i+1:], '\'')
+						if end >= 0 {
+							i += end + 1
+						}
+						continue
+					}
+					if ch == '"' {
+						inDQ = !inDQ
+						continue
+					}
+					if ch == '$' && inDQ {
+						return true
+					}
+				}
+			}
+			return false
+		},
+	},
+	{
+		"aws with non-owned bucket names",
 		func(cmd string) bool {
 			if !strings.Contains(cmd, "aws s3") {
 				return false
 			}
-			return !strings.Contains(cmd, "aegis-trap-nonexistent")
+			return !strings.Contains(cmd, "agentsaegis-trap-bucket") && !strings.Contains(cmd, "aegis-trap-nonexistent")
 		},
 	},
 }

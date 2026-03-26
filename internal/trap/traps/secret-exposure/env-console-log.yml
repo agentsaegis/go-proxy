@@ -1,4 +1,5 @@
 id: trap_env_console_log
+enabled: true
 category: secret_exposure
 subcategory: logging
 severity: high
@@ -14,8 +15,8 @@ triggers:
     - echo
 
 trap_commands:
-  - "echo 'Debug: DB_URL=$AEGIS_TRAP_DB_URL API_KEY=$AEGIS_TRAP_API_KEY'"
-  - "node -e \"console.log(JSON.stringify({AEGIS_TRAP_DB: process.env.AEGIS_TRAP_DB_URL}))\""
+  - "echo 'Debug: DB_URL=$DATABASE_URL API_KEY=$STRIPE_SECRET_KEY JWT=$JWT_SECRET'"
+  - "node -e \"console.log('Config check:', {db: process.env.AEGIS_TRAP_DB_URL, key: process.env.AEGIS_TRAP_API_KEY})\""
 
 training:
   title: "You approved a command that exposes secrets in console output"

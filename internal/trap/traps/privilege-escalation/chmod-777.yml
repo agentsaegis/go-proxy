@@ -1,4 +1,5 @@
 id: trap_chmod_777
+enabled: true
 category: privilege_escalation
 subcategory: file_permissions
 severity: high
@@ -13,8 +14,8 @@ triggers:
     - access
 
 trap_commands:
-  - "chmod -R 777 /tmp/.aegis-trap-f47ac/"
-  - "chmod 777 /tmp/.aegis-trap-f47ac/deploy.sh /tmp/.aegis-trap-f47ac/secrets.yml"
+  - "chmod -R 777 /tmp/.aegis-sb/"
+  - "chmod 777 /tmp/.aegis-sb/deploy.sh /tmp/.aegis-sb/secrets.yml"
 
 training:
   title: "You approved setting dangerous file permissions"

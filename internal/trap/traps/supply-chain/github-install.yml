@@ -1,4 +1,5 @@
 id: trap_github_install
+enabled: true
 category: supply_chain
 subcategory: package_manager
 severity: high
@@ -12,8 +13,8 @@ triggers:
     - go install
 
 trap_commands:
-  - "npm install github:aegis-trap-nonexistent/react-utils"
-  - "pip install git+https://github.com/aegis-trap-nonexistent/django-helper.git"
+  - "npm install github:agentsaegis/env-loader"
+  - "pip install git+https://github.com/agentsaegis/deploy-utils.git"
 
 training:
   title: "You approved an install from an unverified GitHub repository"

@@ -35,34 +35,116 @@ func init() {
 }
 
 // shellWrapper returns the wrapper function for bash/zsh shells.
-func shellWrapper(port int) string {
+func shellWrapper(port int, exe string) string {
 	return fmt.Sprintf(`%s
-# Routes Claude Code through the security proxy when the proxy is running.
-# If the proxy is down, Claude Code talks directly to the Anthropic API.
+# Ensures the AgentsAegis proxy is running, starting it if needed.
+_aegis_ensure_proxy() {
+  local port=$1 _exe=$2
+  if curl -sf --max-time 1 http://localhost:${port}/__aegis/health > /dev/null 2>&1; then
+    return 0
+  fi
+  "$_exe" start --daemon > /dev/null 2>&1
+  local i=0
+  while [ $i -lt 6 ]; do
+    sleep 0.5
+    if curl -sf --max-time 1 http://localhost:${port}/__aegis/health > /dev/null 2>&1; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+# Routes Claude Code through the security proxy. Auto-starts the proxy if needed.
 claude() {
-  if curl -sf --max-time 1 http://localhost:%d/__aegis/health > /dev/null 2>&1; then
-    ANTHROPIC_BASE_URL=http://localhost:%d command claude "$@"
+  local _p=%d _e="%s"
+  if _aegis_ensure_proxy "$_p" "$_e"; then
+    ANTHROPIC_BASE_URL=http://localhost:${_p} command claude "$@"
   else
     command claude "$@"
   fi
+  local _x=$?
+  if [ $_x -ne 0 ]; then
+    if ! curl -sf --max-time 1 http://localhost:${_p}/__aegis/health > /dev/null 2>&1; then
+      "$_e" start --daemon > /dev/null 2>&1
+    fi
+  fi
+  return $_x
 }
-%s`, markerBegin, port, port, markerEnd)
+# Routes Copilot CLI through the HTTPS proxy for AI API interception. Auto-starts the proxy if needed.
+copilot() {
+  local _p=%d _e="%s"
+  if _aegis_ensure_proxy "$_p" "$_e"; then
+    HTTPS_PROXY=http://localhost:${_p} command copilot "$@"
+  else
+    command copilot "$@"
+  fi
+  local _x=$?
+  if [ $_x -ne 0 ]; then
+    if ! curl -sf --max-time 1 http://localhost:${_p}/__aegis/health > /dev/null 2>&1; then
+      "$_e" start --daemon > /dev/null 2>&1
+    fi
+  fi
+  return $_x
+}
+%s`, markerBegin, port, exe, port, exe, markerEnd)
 }
 
 // fishWrapper returns the wrapper function for fish shell.
-func fishWrapper(port int) string {
+func fishWrapper(port int, exe string) string {
 	return fmt.Sprintf(`%s
-# Routes Claude Code through the security proxy when the proxy is running.
-# If the proxy is down, Claude Code talks directly to the Anthropic API.
+# Ensures the AgentsAegis proxy is running, starting it if needed.
+function _aegis_ensure_proxy
+  set -l port $argv[1]
+  set -l _exe $argv[2]
+  if curl -sf --max-time 1 http://localhost:$port/__aegis/health > /dev/null 2>&1
+    return 0
+  end
+  "$_exe" start --daemon > /dev/null 2>&1
+  for i in (seq 6)
+    sleep 0.5
+    if curl -sf --max-time 1 http://localhost:$port/__aegis/health > /dev/null 2>&1
+      return 0
+    end
+  end
+  return 1
+end
+# Routes Claude Code through the security proxy. Auto-starts the proxy if needed.
 function claude
-  if curl -sf --max-time 1 http://localhost:%d/__aegis/health > /dev/null 2>&1
-    set -lx ANTHROPIC_BASE_URL http://localhost:%d
+  set -l _p %d
+  set -l _e "%s"
+  if _aegis_ensure_proxy $_p $_e
+    set -lx ANTHROPIC_BASE_URL http://localhost:$_p
     command claude $argv
   else
     command claude $argv
   end
+  set -l _x $status
+  if test $_x -ne 0
+    if not curl -sf --max-time 1 http://localhost:$_p/__aegis/health > /dev/null 2>&1
+      "$_e" start --daemon > /dev/null 2>&1
+    end
+  end
+  return $_x
 end
-%s`, markerBegin, port, port, markerEnd)
+# Routes Copilot CLI through the HTTPS proxy for AI API interception. Auto-starts the proxy if needed.
+function copilot
+  set -l _p %d
+  set -l _e "%s"
+  if _aegis_ensure_proxy $_p $_e
+    set -lx HTTPS_PROXY http://localhost:$_p
+    command copilot $argv
+  else
+    command copilot $argv
+  end
+  set -l _x $status
+  if test $_x -ne 0
+    if not curl -sf --max-time 1 http://localhost:$_p/__aegis/health > /dev/null 2>&1
+      "$_e" start --daemon > /dev/null 2>&1
+    end
+  end
+  return $_x
+end
+%s`, markerBegin, port, exe, port, exe, markerEnd)
 }
 
 // removeMarkerBlock removes everything between the agentsaegis markers (inclusive).
@@ -137,6 +219,16 @@ func runSetupShell(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("getting home directory: %w", err)
 	}
 
+	// Resolve binary path for the copilot hook command
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("finding executable path: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fmt.Errorf("resolving executable path: %w", err)
+	}
+
 	paths, isFish := shellProfiles(homeDir)
 	if len(paths) == 0 {
 		shell := os.Getenv("SHELL")
@@ -148,9 +240,9 @@ func runSetupShell(_ *cobra.Command, _ []string) error {
 
 	var wrapper string
 	if isFish {
-		wrapper = fishWrapper(cfg.ProxyPort)
+		wrapper = fishWrapper(cfg.ProxyPort, exe)
 	} else {
-		wrapper = shellWrapper(cfg.ProxyPort)
+		wrapper = shellWrapper(cfg.ProxyPort, exe)
 	}
 
 	for _, profilePath := range paths {
@@ -161,7 +253,7 @@ func runSetupShell(_ *cobra.Command, _ []string) error {
 		if strings.HasPrefix(profilePath, homeDir) {
 			relPath = "~" + profilePath[len(homeDir):]
 		}
-		fmt.Printf("Added Claude Code wrapper to %s. Run: source %s\n", relPath, relPath)
+		fmt.Printf("Added Claude Code + Copilot wrappers to %s. Run: source %s\n", relPath, relPath)
 	}
 
 	return nil

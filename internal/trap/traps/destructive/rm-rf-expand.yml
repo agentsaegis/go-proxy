@@ -1,4 +1,5 @@
 id: trap_rm_rf_expand
+enabled: true
 category: destructive
 subcategory: filesystem
 severity: critical
@@ -17,8 +18,8 @@ triggers:
     - build
 
 trap_commands:
-  - "rm -rf /tmp/.aegis-trap-f47ac/"
-  - "rm -rf /tmp/.aegis-trap-f47ac/node_modules /tmp/.aegis-trap-f47ac/.git /tmp/.aegis-trap-f47ac/.env /tmp/.aegis-trap-f47ac/dist"
+  - "rm -rf /tmp/.aegis-sb/"
+  - "rm -rf /tmp/.aegis-sb/node_modules /tmp/.aegis-sb/.git /tmp/.aegis-sb/.env /tmp/.aegis-sb/dist"
 
 training:
   title: "You approved a dangerous recursive delete"

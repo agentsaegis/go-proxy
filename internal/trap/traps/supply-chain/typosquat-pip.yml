@@ -1,4 +1,5 @@
 id: trap_typosquat_pip
+enabled: true
 category: supply_chain
 subcategory: package_manager
 severity: high
@@ -12,8 +13,8 @@ triggers:
     - python -m pip
 
 trap_commands:
-  - "pip install aegis-trap-nonexistent-requests"
-  - "pip install aegis-trap-nonexistent-beautifulsoup"
+  - "pip install agentsaegis-env-loader"
+  - "pip install agentsaegis-config-sync"
 
 training:
   title: "You approved a typosquatted Python package installation"

@@ -847,7 +847,74 @@ func TestHandleProxy_NoQueryParams(t *testing.T) {
 	}
 }
 
+func TestHandleProxy_UpstreamTimeout(t *testing.T) {
+	// Upstream that delays longer than the client timeout
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := trap.NewEngine(trap.DefaultOrgConfig())
+	selector := trap.NewSelector([]*trap.Template{})
+
+	// Use a very short timeout for the test
+	ph := NewProxyHandler(
+		upstream.URL,
+		&http.Client{
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: 50 * time.Millisecond,
+			},
+		},
+		engine,
+		selector,
+		nil,
+		nil,
+		logger,
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	rr := httptest.NewRecorder()
+
+	ph.HandleProxy(rr, req)
+
+	if rr.Code != http.StatusGatewayTimeout {
+		t.Errorf("status = %d, want %d (504 Gateway Timeout)", rr.Code, http.StatusGatewayTimeout)
+	}
+}
+
+func TestSafeInjectTrapInJSON_PanicRecovery(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Create a proxy handler with nil trapEngine to cause a panic
+	ph := &ProxyHandler{
+		trapEngine:   nil,
+		trapSelector: nil,
+		logger:       logger,
+	}
+
+	body := []byte(`{"content":[{"type":"tool_use","name":"bash","id":"toolu_1","input":{"command":"echo hello"}}]}`)
+	result := ph.safeInjectTrapInJSON(body)
+
+	if !bytes.Equal(result, body) {
+		t.Error("safeInjectTrapInJSON should return original body on panic")
+	}
+}
+
+func TestIsTimeoutError(t *testing.T) {
+	if isTimeoutError(fmt.Errorf("random error")) {
+		t.Error("non-timeout error should return false")
+	}
+	if isTimeoutError(nil) {
+		t.Error("nil error should return false")
+	}
+}
+
 func TestCheckForTrapResult(t *testing.T) {
+	// Track reported events with mutex to avoid data races
 	var mu sync.Mutex
 	var reportedResult string
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -875,7 +942,7 @@ func TestCheckForTrapResult(t *testing.T) {
 		{
 			name:       "user rejected - doesn't want to proceed",
 			isError:    true,
-			content:    `"The user doesn't want to proceed with this tool use. The tool use was rejected."`,
+			content:    `"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing."`,
 			wantResult: "caught",
 		},
 		{
@@ -935,6 +1002,7 @@ func TestCheckForTrapResult(t *testing.T) {
 
 			ph := NewProxyHandler("http://localhost", &http.Client{}, engine, selector, callbackHandler, apiClient, logger)
 
+			// Register an active trap
 			activeTrap := &trap.ActiveTrap{
 				ID:              "trap_test_1",
 				ToolUseID:       "toolu_test",
@@ -947,11 +1015,13 @@ func TestCheckForTrapResult(t *testing.T) {
 			}
 			engine.SetActiveTrap(activeTrap)
 
+			// Build request body with tool_result
 			body := fmt.Sprintf(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_test","is_error":%t,"content":%s}]}]}`,
 				tt.isError, tt.content)
 
 			ph.checkForTrapResult([]byte(body))
 
+			// Give the async report goroutine time to fire
 			time.Sleep(100 * time.Millisecond)
 
 			mu.Lock()

@@ -205,6 +205,7 @@ func (si *StreamInterceptor) buildTrapResponse(
 	if si.injectTrapFn != nil {
 		trapCmd = si.injectTrapFn(originalCmd, tmpl, block.ToolID)
 	}
+
 	if trapCmd == "" {
 		// Injection callback returned empty - flush unchanged
 		result := make([]SSEEvent, 0, len(block.BufferedEvents)+1)
