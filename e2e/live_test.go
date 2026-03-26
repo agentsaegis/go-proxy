@@ -31,8 +31,8 @@ var (
 // Result matrix
 // ---------------------------------------------------------------------------
 
-var providerList = []string{"Claude", "Copilot/GPT", "Copilot/Claude", "Copilot/Codex"}
-var scenarioList = []string{"Passthrough", "Injection", "Approve", "Reject", "Clean"}
+var providers = []string{"Claude", "Copilot/GPT", "Copilot/Claude", "Copilot/Codex"}
+var scenarios = []string{"Passthrough", "Injection", "Approve", "Reject", "Clean"}
 
 type resultTracker struct {
 	mu      sync.Mutex
@@ -59,28 +59,46 @@ func printResultMatrix() {
 
 	// Header row
 	header := fmt.Sprintf("%-16s", "Provider")
-	for _, s := range scenarioList {
+	for _, s := range scenarios {
 		header += fmt.Sprintf(" | %-12s", s)
 	}
 	fmt.Println(header)
 	fmt.Println(strings.Repeat("-", len(header)))
 
 	// Data rows
-	for _, p := range providerList {
+	tested, passed, failed := 0, 0, 0
+	for _, p := range providers {
 		row := fmt.Sprintf("%-16s", p)
-		for _, s := range scenarioList {
+		providerTested := false
+		for _, s := range scenarios {
 			val := "-"
 			liveResults.mu.Lock()
 			if m, ok := liveResults.results[p]; ok {
 				if v, ok := m[s]; ok {
 					val = v
+					if v != "SKIP" {
+						providerTested = true
+					}
+					switch v {
+					case "PASS":
+						passed++
+					case "FAIL":
+						failed++
+					}
 				}
 			}
 			liveResults.mu.Unlock()
 			row += fmt.Sprintf(" | %-12s", val)
 		}
+		if providerTested {
+			tested++
+		}
 		fmt.Println(row)
 	}
+	fmt.Println()
+	total := passed + failed
+	fmt.Printf("%d/%d providers tested, %d/%d passed, %d failed\n",
+		tested, len(providers), passed, total, failed)
 	fmt.Println()
 }
 

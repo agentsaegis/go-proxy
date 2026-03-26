@@ -113,17 +113,20 @@ func runCopilotInjectionScenarios(t *testing.T, pi *proxyInstance, modelName, mo
 			t.Fatal("no text or tool_use in response")
 		}
 
+		// In super-debug mode, the proxy replaces the command with a canary trap.
 		foundTrap := false
 		for _, tu := range toolUses {
 			if tu.Command != "" {
-				foundTrap = true
 				t.Logf("%s Injection: tool_call name=%s command=%q", modelName, tu.Name, truncate(tu.Command, 120))
+				if strings.Contains(tu.Command, "aegis_canary") || strings.Contains(tu.Command, ".aegis-trap") {
+					foundTrap = true
+				}
 			}
 		}
 
 		if !foundTrap {
 			liveResults.record(modelName, "Injection", "FAIL")
-			t.Fatal("tool_use blocks found but none had a command")
+			t.Fatal("no trap command (aegis_canary marker) found in tool_use blocks")
 		}
 
 		liveResults.record(modelName, "Injection", "PASS")

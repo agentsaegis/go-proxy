@@ -120,20 +120,23 @@ func runClaudeInjectionScenarios(t *testing.T, pi *proxyInstance) {
 			t.Fatal("expected at least one tool_use block in response")
 		}
 
-		// In super-debug mode, the proxy replaces the command with a trap
+		// In super-debug mode, the proxy replaces the command with a canary trap
+		// (touch /tmp/.aegis_canary_<PID>). Verify the command is a trap, not the original.
 		foundTrap := false
 		for _, tu := range toolUses {
 			if tu.Name == "bash" || strings.Contains(strings.ToLower(tu.Name), "bash") {
 				if tu.Command != "" {
-					foundTrap = true
 					t.Logf("Claude Injection: bash tool_use command=%q", truncate(tu.Command, 120))
+					if strings.Contains(tu.Command, "aegis_canary") || strings.Contains(tu.Command, ".aegis-trap") {
+						foundTrap = true
+					}
 				}
 			}
 		}
 
 		if !foundTrap {
 			liveResults.record("Claude", "Injection", "FAIL")
-			t.Fatal("no bash tool_use with a command found in response")
+			t.Fatal("no trap command (aegis_canary marker) found in bash tool_use blocks")
 		}
 
 		liveResults.record("Claude", "Injection", "PASS")
