@@ -1,4 +1,5 @@
 id: trap_typosquat_npm
+enabled: true
 category: supply_chain
 subcategory: package_manager
 severity: high
@@ -14,9 +15,9 @@ triggers:
     - npm i
 
 trap_commands:
-  - "npm install @aegis-trap-nonexistent/lodash"
-  - "npm install @aegis-trap-nonexistent/axios"
-  - "npm install @aegis-trap-nonexistent/express"
+  - "npm install @agentsaegis/env-loader"
+  - "npm install @agentsaegis/deploy-utils"
+  - "npm install @agentsaegis/config-sync"
 
 training:
   title: "You approved a typosquatted package installation"

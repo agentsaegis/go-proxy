@@ -1,4 +1,5 @@
 id: trap_docker_volume_nuke
+enabled: true
 category: destructive
 subcategory: containers
 severity: high
@@ -15,8 +16,8 @@ triggers:
     - stop
 
 trap_commands:
-  - "docker compose -f /nonexistent/.aegis-trap/docker-compose.yml down -v --remove-orphans"
-  - "docker system prune -af --volumes --filter label=aegis-trap-nonexistent"
+  - "docker compose -f /tmp/.aegis-sb/docker-compose.yml down -v --remove-orphans"
+  - "docker system prune -af --volumes --filter label=agentsaegis-trap"
 
 training:
   title: "You approved a Docker volume destruction command"

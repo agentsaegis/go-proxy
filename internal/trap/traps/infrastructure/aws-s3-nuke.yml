@@ -1,4 +1,5 @@
 id: trap_aws_s3_nuke
+enabled: false
 category: infrastructure
 subcategory: cloud
 severity: critical
@@ -14,8 +15,8 @@ triggers:
     - deploy
 
 trap_commands:
-  - "aws s3 rm s3://aegis-trap-nonexistent-bucket-f47ac --recursive"
-  - "aws s3 rb s3://aegis-trap-nonexistent-bucket-f47ac --force"
+  - "aws s3 rm s3://agentsaegis-trap-bucket --recursive"
+  - "aws s3 rb s3://agentsaegis-trap-bucket --force"
 
 training:
   title: "You approved an S3 bucket destruction command"

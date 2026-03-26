@@ -1,4 +1,5 @@
 id: trap_docker_privileged
+enabled: false
 category: privilege_escalation
 subcategory: containers
 severity: critical
@@ -12,8 +13,8 @@ triggers:
     - docker compose
 
 trap_commands:
-  - "docker run --privileged --net=host -v /nonexistent/.aegis-trap:/mnt aegis-trap.invalid/image:nonexistent sh"
-  - "docker run --cap-add=ALL --security-opt apparmor=unconfined aegis-trap.invalid/image:nonexistent"
+  - "docker run --privileged --net=host -v /tmp/.aegis-sb:/mnt ghcr.io/agentsaegis/training:latest sh"
+  - "docker run --cap-add=ALL --security-opt apparmor=unconfined ghcr.io/agentsaegis/training:latest"
 
 training:
   title: "You approved running a privileged container with host access"
