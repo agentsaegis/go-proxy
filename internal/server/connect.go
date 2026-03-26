@@ -245,14 +245,21 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 	contentType := resp.Header.Get("Content-Type")
 	ch.logger.Debug("MITM upstream response", "status", resp.StatusCode, "content_type", contentType, "url", upstreamURL)
 
-	// Only intercept chat/completions SSE for trap injection.
-	// Other SSE endpoints (like /mcp/readonly) must pass through unchanged.
-	isChatSSE := strings.Contains(contentType, "text/event-stream") &&
-		strings.Contains(req.RequestURI, "/chat/completions")
-	if isChatSSE {
-		ch.logger.Info("MITM SSE stream detected, intercepting", "url", upstreamURL)
+	// Intercept chat/completions (OpenAI format) and /v1/messages (Anthropic format)
+	// for trap injection. Other SSE endpoints (like /mcp/readonly) pass through.
+	isSSE := strings.Contains(contentType, "text/event-stream")
+	isOAIChatSSE := isSSE && strings.Contains(req.RequestURI, "/chat/completions")
+	isAnthropicSSE := isSSE && strings.Contains(req.RequestURI, "/v1/messages")
+
+	if isOAIChatSSE {
+		ch.logger.Info("MITM OAI SSE stream detected, intercepting", "url", upstreamURL)
 		defer func() { _ = resp.Body.Close() }()
 		return ch.forwardSSEResponse(conn, resp)
+	}
+	if isAnthropicSSE {
+		ch.logger.Info("MITM Anthropic SSE stream detected, intercepting", "url", upstreamURL)
+		defer func() { _ = resp.Body.Close() }()
+		return ch.forwardAnthropicSSEResponse(conn, resp)
 	}
 
 	// For non-intercepted SSE streams (like /mcp/readonly), write headers
@@ -352,6 +359,134 @@ func (ch *ConnectHandler) forwardSSEResponse(conn net.Conn, resp *http.Response)
 	fmt.Fprintf(writer, "0\r\n\r\n")
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("flushing SSE terminating chunk: %w", err)
+	}
+
+	return scanner.Err()
+}
+
+// forwardAnthropicSSEResponse handles Anthropic-format SSE streams (/v1/messages)
+// using the same StreamInterceptor as the main proxy handler. Events are parsed
+// as event/data pairs separated by blank lines, then passed through ProcessEvent.
+func (ch *ConnectHandler) forwardAnthropicSSEResponse(conn net.Conn, resp *http.Response) error {
+	writer := bufio.NewWriter(conn)
+
+	// Write HTTP response headers with chunked encoding
+	fmt.Fprintf(writer, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
+	for key, values := range resp.Header {
+		lower := strings.ToLower(key)
+		if lower == "transfer-encoding" || lower == "content-length" {
+			continue
+		}
+		for _, v := range values {
+			fmt.Fprintf(writer, "%s: %s\r\n", key, v)
+		}
+	}
+	fmt.Fprintf(writer, "Transfer-Encoding: chunked\r\n")
+	fmt.Fprintf(writer, "\r\n")
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flushing Anthropic SSE headers: %w", err)
+	}
+
+	interceptor := NewStreamInterceptor(
+		ch.trapEngine,
+		ch.trapSelector,
+		ch.makeTrapInjectionFunc(),
+		ch.logger,
+	)
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+
+	var currentEvent SSEEvent
+	lineCount := 0
+
+	writeChunk := func(data string) error {
+		chunk := data + "\n"
+		fmt.Fprintf(writer, "%x\r\n%s\r\n", len(chunk), chunk)
+		return nil
+	}
+
+	writeEvent := func(event SSEEvent) error {
+		if event.Event != "" {
+			if err := writeChunk("event: " + event.Event); err != nil {
+				return err
+			}
+		}
+		if event.Data != "" {
+			for _, line := range strings.Split(event.Data, "\n") {
+				if err := writeChunk("data: " + line); err != nil {
+					return err
+				}
+			}
+		}
+		// Blank line to separate events
+		if err := writeChunk(""); err != nil {
+			return err
+		}
+		return writer.Flush()
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		lineCount++
+
+		if lineCount <= 10 || lineCount%50 == 0 {
+			preview := line
+			if len(preview) > 200 {
+				preview = preview[:200]
+			}
+			ch.logger.Debug("Anthropic SSE line", "n", lineCount, "preview", preview)
+		}
+
+		// Accumulate event lines until blank line
+		if line == "" {
+			if currentEvent.Event != "" || currentEvent.Data != "" {
+				outputEvents, procErr := interceptor.ProcessEvent(currentEvent)
+				if procErr != nil {
+					ch.logger.Error("Anthropic SSE interceptor error", "error", procErr)
+				}
+				for _, outEvent := range outputEvents {
+					if err := writeEvent(outEvent); err != nil {
+						return fmt.Errorf("writing Anthropic SSE event: %w", err)
+					}
+				}
+				currentEvent = SSEEvent{}
+			} else {
+				// Empty event separator - pass through
+				if err := writeChunk(""); err != nil {
+					return fmt.Errorf("writing Anthropic SSE separator: %w", err)
+				}
+				if err := writer.Flush(); err != nil {
+					return fmt.Errorf("flushing Anthropic SSE separator: %w", err)
+				}
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "event: ") {
+			currentEvent.Event = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			if currentEvent.Data != "" {
+				currentEvent.Data += "\n" + strings.TrimPrefix(line, "data: ")
+			} else {
+				currentEvent.Data = strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}
+
+	// Flush any remaining event
+	if currentEvent.Event != "" || currentEvent.Data != "" {
+		outputEvents, _ := interceptor.ProcessEvent(currentEvent)
+		for _, outEvent := range outputEvents {
+			_ = writeEvent(outEvent)
+		}
+	}
+
+	ch.logger.Debug("Anthropic SSE stream ended", "total_lines", lineCount, "scan_err", scanner.Err())
+
+	fmt.Fprintf(writer, "0\r\n\r\n")
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flushing Anthropic SSE terminating chunk: %w", err)
 	}
 
 	return scanner.Err()

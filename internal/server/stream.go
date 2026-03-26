@@ -93,8 +93,8 @@ func (si *StreamInterceptor) handleBlockStart(event SSEEvent) ([]SSEEvent, error
 
 	si.logger.Debug("content_block_start", "index", payload.Index, "type", payload.ContentBlock.Type, "name", payload.ContentBlock.Name)
 
-	if payload.ContentBlock.Type == "tool_use" && strings.EqualFold(payload.ContentBlock.Name, "bash") {
-		si.logger.Debug("bash tool_use detected - buffering block", "index", payload.Index, "tool_id", payload.ContentBlock.ID)
+	if payload.ContentBlock.Type == "tool_use" && isShellToolName(payload.ContentBlock.Name) {
+		si.logger.Debug("shell tool_use detected - buffering block", "index", payload.Index, "name", payload.ContentBlock.Name, "tool_id", payload.ContentBlock.ID)
 		block := &ContentBlockState{
 			Index:     payload.Index,
 			IsToolUse: true,
