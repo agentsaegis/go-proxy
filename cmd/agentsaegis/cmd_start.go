@@ -74,10 +74,14 @@ func startDaemon(cfg *config.Config) error {
 		return fmt.Errorf("getting config directory: %w", err)
 	}
 
-	// Check if already running
+	// Check if already running; clean stale PID file if process is dead
 	pid, readErr := daemon.ReadPID(configDir)
-	if readErr == nil && daemon.IsRunning(pid) {
-		return fmt.Errorf("AgentsAegis proxy is already running (PID %d)", pid)
+	if readErr == nil {
+		if daemon.IsRunning(pid) {
+			return fmt.Errorf("AgentsAegis proxy is already running (PID %d)", pid)
+		}
+		// Stale PID file from a crashed/killed process - clean it up
+		_ = daemon.RemovePID(configDir)
 	}
 
 	logPath := daemon.LogFile(configDir)
