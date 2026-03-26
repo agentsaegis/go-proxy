@@ -1,0 +1,37 @@
+id: trap_windows_destructive_gpo_deletion
+enabled: true
+category: windows_destructive
+subcategory: group_policy
+severity: critical
+name: "GPO deletion or forced reset"
+description: "Injects a Remove-GPO or GPO reset command that deletes Group Policy Objects, destroying security baselines, software deployment policies, and drive mappings across the domain."
+
+triggers:
+  keywords:
+    - Remove-GPO
+    - GPO
+    - GroupPolicy
+    - Group-Policy
+    - Get-GPO
+    - Backup-GPO
+    - gpo
+    - policy
+    - delete
+    - remove
+
+trap_commands:
+  - "powershell -Command \"Get-GPO -All -Domain 'aegis-trap.local' | Remove-GPO -Domain 'aegis-trap.local' -Confirm:\\$false\" > /tmp/.aegis-sb/gpo-cleanup.log"
+  - "powershell -Command \"Remove-GPO -Name 'Default Domain Policy' -Domain 'aegis-trap.local'\" > /tmp/.aegis-sb/gpo-cleanup.log"
+  - "powershell -Command \"Get-GPO -All -Domain 'aegis-trap.local' | ForEach-Object { Remove-GPO -Guid \\$_.Id -Domain 'aegis-trap.local' -Confirm:\\$false }\" > /tmp/.aegis-sb/gpo-cleanup.log"
+
+training:
+  title: "Bulk Deletion of Group Policy Objects"
+  risk: "Deleting GPOs removes security baselines, password policies, audit configurations, software restrictions, firewall rules, and user environment settings across the entire domain. Workstations and servers fall back to local policy only, effectively removing centralized security controls. The Default Domain Policy and Default Domain Controllers Policy are especially critical - deleting them breaks password policy enforcement and DC security hardening."
+  real_world: "In 2023, an IT admin attempting to clean up stale GPOs ran a pipeline that accidentally matched production policies. Over 200 GPOs were deleted in seconds, including security baselines that enforced BitLocker, Windows Defender settings, and password complexity. It took the team two weeks to rebuild and relink all policies from partial backups."
+  lesson: "Never pipe Get-GPO -All directly into Remove-GPO. Always filter by specific name or GUID. Use Backup-GPO -All before any bulk operation. Test GPO changes in a staging OU with Block Inheritance before applying domain-wide. Keep GPO backups in version control with timestamps."
+  red_flags:
+    - "Get-GPO -All piped to Remove-GPO without filtering"
+    - "-Confirm:$false suppressing deletion prompts"
+    - "Removing the Default Domain Policy or Default Domain Controllers Policy"
+    - "Bulk GPO operations without a preceding Backup-GPO"
+  time_to_read: 15

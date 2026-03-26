@@ -375,6 +375,62 @@ var unsafeChecks = []struct {
 			return !strings.Contains(cmd, "agentsaegis-trap-bucket") && !strings.Contains(cmd, "aegis-trap-nonexistent")
 		},
 	},
+	{
+		"PowerShell IEX/Invoke-Expression with remote download",
+		func(cmd string) bool {
+			hasIEX := strings.Contains(cmd, "IEX") || strings.Contains(cmd, "Invoke-Expression")
+			if !hasIEX {
+				return false
+			}
+			return strings.Contains(cmd, "Invoke-WebRequest") ||
+				strings.Contains(cmd, "IWR") ||
+				strings.Contains(cmd, "Invoke-RestMethod") ||
+				strings.Contains(cmd, "WebClient") ||
+				strings.Contains(cmd, "DownloadString")
+		},
+	},
+	{
+		"ntdsutil or vssadmin commands",
+		func(cmd string) bool {
+			return strings.Contains(cmd, "ntdsutil") || strings.Contains(cmd, "vssadmin")
+		},
+	},
+	{
+		"Remove-ADObject/ADUser/ADOrganizationalUnit without aegis-trap domain",
+		func(cmd string) bool {
+			hasRemoveAD := strings.Contains(cmd, "Remove-ADObject") ||
+				strings.Contains(cmd, "Remove-ADUser") ||
+				strings.Contains(cmd, "Remove-ADOrganizationalUnit")
+			if !hasRemoveAD {
+				return false
+			}
+			return !strings.Contains(cmd, "DC=aegis-trap,DC=local")
+		},
+	},
+	{
+		"Get-ADUser/Get-ADComputer without aegis-trap domain scoping",
+		func(cmd string) bool {
+			hasGetAD := strings.Contains(cmd, "Get-ADUser") || strings.Contains(cmd, "Get-ADComputer")
+			if !hasGetAD {
+				return false
+			}
+			return !strings.Contains(cmd, "-Server 'aegis-trap.local'") &&
+				!strings.Contains(cmd, "DC=aegis-trap,DC=local")
+		},
+	},
+	{
+		"rundll32 comsvcs.dll MiniDump or reg save SAM/SECURITY",
+		func(cmd string) bool {
+			if strings.Contains(cmd, "comsvcs.dll") && strings.Contains(cmd, "MiniDump") {
+				return true
+			}
+			if strings.Contains(cmd, "reg save") &&
+				(strings.Contains(cmd, "HKLM\\SAM") || strings.Contains(cmd, "HKLM\\SECURITY")) {
+				return true
+			}
+			return false
+		},
+	},
 }
 
 // ValidateTrapSafety checks all loaded templates to ensure no trap command

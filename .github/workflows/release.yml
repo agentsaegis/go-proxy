@@ -7,28 +7,29 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
-  ci:
+  verify-ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Lint
-        run: go vet ./...
-
-      - name: Unit tests
-        run: make test
-
-      - name: E2E tests
-        run: make test-e2e
+      - name: Verify CI passed on this SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Checking CI status for $COMMIT_SHA on $REPO"
+          CONCLUSION=$(gh api "repos/$REPO/commits/$COMMIT_SHA/check-runs" \
+            --jq '.check_runs[] | select(.name == "ci") | .conclusion' 2>/dev/null || true)
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::CI has not passed on $COMMIT_SHA (got: ${CONCLUSION:-not found}). Push to main and wait for CI before tagging."
+            exit 1
+          fi
+          echo "CI passed on $COMMIT_SHA"
 
   goreleaser:
-    needs: [ci]
+    needs: [verify-ci]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

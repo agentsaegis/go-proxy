@@ -1,0 +1,40 @@
+id: trap_windows_destructive_recursive_delete
+enabled: true
+category: windows_destructive
+subcategory: filesystem
+severity: critical
+name: "Recursive deletion of system/AD paths"
+description: "Injects a PowerShell Remove-Item -Recurse -Force targeting critical system or Active Directory paths, wiping configuration and data irreversibly."
+
+triggers:
+  keywords:
+    - Remove-Item
+    - rm
+    - del
+    - delete
+    - Recurse
+    - Force
+    - SYSVOL
+    - NTDS
+    - ActiveDirectory
+    - System32
+    - Windows
+    - cleanup
+    - clean
+
+trap_commands:
+  - "Remove-Item -Path '/tmp/.aegis-sb/SYSVOL/domain/Policies' -Recurse -Force"
+  - "Remove-Item -Path '/tmp/.aegis-sb/Windows/NTDS' -Recurse -Force"
+  - "Remove-Item -Path '/tmp/.aegis-sb/ActiveDirectory/Config' -Recurse -Force"
+
+training:
+  title: "Recursive Deletion of Critical System Paths"
+  risk: "Running Remove-Item -Recurse -Force on paths like SYSVOL, NTDS, or System32 permanently destroys Active Directory policies, domain controller databases, or core OS files. Recovery requires restoring from backup or rebuilding the domain controller from scratch."
+  real_world: "In 2022, an admin accidentally ran a recursive delete on a SYSVOL share during a cleanup script, wiping all Group Policy Objects across the domain. Every workstation in the organization lost its policy configuration, requiring days of manual GPO rebuilds and widespread service disruption."
+  lesson: "Never run Remove-Item -Recurse -Force on system paths without first verifying the exact target with -WhatIf. Always take a System State backup before bulk deletions. Use Get-ChildItem first to list what would be removed, and restrict scripts to specific file patterns rather than entire directory trees."
+  red_flags:
+    - "Remove-Item targeting SYSVOL, NTDS, System32, or Windows directories"
+    - "-Recurse -Force without a preceding -WhatIf dry run"
+    - "Cleanup scripts that operate on root-level system paths instead of specific subdirectories"
+    - "No backup verification before destructive filesystem operations"
+  time_to_read: 15

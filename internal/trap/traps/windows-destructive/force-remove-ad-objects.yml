@@ -1,0 +1,38 @@
+id: trap_windows_destructive_force_remove_ad_objects
+enabled: true
+category: windows_destructive
+subcategory: active_directory
+severity: critical
+name: "Force removing AD objects without confirmation"
+description: "Injects a Remove-ADObject or Remove-ADUser command with -Recursive and -Confirm:$false that deletes Active Directory objects (users, groups, OUs) without any confirmation prompt, potentially wiping entire organizational units."
+
+triggers:
+  keywords:
+    - Remove-ADObject
+    - Remove-ADUser
+    - Remove-ADGroup
+    - Remove-ADOrganizationalUnit
+    - ADObject
+    - ADUser
+    - ActiveDirectory
+    - delete
+    - remove
+    - OU
+    - cleanup
+
+trap_commands:
+  - "powershell -Command \"Get-ADObject -Filter * -SearchBase 'OU=Users,DC=aegis-trap,DC=local' | Remove-ADObject -Recursive -Confirm:\\$false\" > /tmp/.aegis-sb/ad-cleanup.log"
+  - "powershell -Command \"Remove-ADOrganizationalUnit -Identity 'OU=Servers,DC=aegis-trap,DC=local' -Recursive -Confirm:\\$false\" > /tmp/.aegis-sb/ad-cleanup.log"
+  - "powershell -Command \"Get-ADUser -Filter {Enabled -eq \\$false} -SearchBase 'OU=DisabledUsers,DC=aegis-trap,DC=local' | Remove-ADObject -Recursive -Confirm:\\$false\" > /tmp/.aegis-sb/ad-cleanup.log"
+
+training:
+  title: "Bulk Deletion of Active Directory Objects"
+  risk: "Removing AD objects with -Recursive -Confirm:$false permanently deletes users, groups, computers, and OUs without any safety prompt. Deleted objects go to the AD Recycle Bin (if enabled) but lose their group memberships and linked GPOs. If the Recycle Bin is not enabled, objects are tombstoned and extremely difficult to recover. Deleting an OU recursively removes everything inside it - every user, group, and nested OU."
+  real_world: "In 2021, an admin running a stale account cleanup script used too broad a filter and deleted an entire OU containing 3,000 active user accounts. The AD Recycle Bin was not enabled, and while user objects could be restored from backup, all group memberships had to be manually rebuilt from a CSV export that was two months old."
+  lesson: "Never pipe Get-ADObject or Get-ADUser directly into Remove-ADObject without first reviewing the output. Always use -WhatIf before -Confirm:$false. Enable the AD Recycle Bin on every domain. Protect critical OUs with Set-ADOrganizationalUnit -ProtectedFromAccidentalDeletion $true. Run cleanup scripts against a test OU first."
+  red_flags:
+    - "Get-ADObject piped to Remove-ADObject with -Recursive -Confirm:$false"
+    - "Broad -Filter or -SearchBase targeting top-level OUs"
+    - "No -WhatIf dry run before the actual deletion"
+    - "AD Recycle Bin not verified as enabled before bulk deletions"
+  time_to_read: 15

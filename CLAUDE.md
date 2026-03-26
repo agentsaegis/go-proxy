@@ -125,6 +125,8 @@ internal/
       secret-exposure/   # env console.log, git add secrets
       privilege-escalation/ # chmod 777, docker privileged
       infrastructure/    # aws s3 nuke
+      windows-destructive/ # PowerShell Remove-Item, firewall disable, service stop, GPO delete, Defender disable
+      windows-exfiltration/ # AD credential export, IEX cradles, NTDS.dit extraction, LSASS/SAM dump
 
   mcp/
     server.go            # MCP JSON-RPC 2.0 server over stdio (initialize, tools/list, tools/call)
