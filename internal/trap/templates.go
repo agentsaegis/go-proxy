@@ -348,20 +348,17 @@ var unsafeChecks = []struct {
 			// Check if $VAR appears inside double quotes (would expand)
 			if strings.Contains(cmd, "echo") {
 				inDQ := false
-				for i, ch := range cmd {
+				inSQ := false
+				for _, ch := range cmd {
 					if ch == '\'' && !inDQ {
-						// Skip single-quoted section entirely
-						end := strings.IndexRune(cmd[i+1:], '\'')
-						if end >= 0 {
-							i += end + 1
-						}
+						inSQ = !inSQ
 						continue
 					}
-					if ch == '"' {
+					if ch == '"' && !inSQ {
 						inDQ = !inDQ
 						continue
 					}
-					if ch == '$' && inDQ {
+					if ch == '$' && inDQ && !inSQ {
 						return true
 					}
 				}

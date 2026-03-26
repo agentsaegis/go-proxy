@@ -212,7 +212,7 @@ func (m *CAManager) writePEM(path, blockType string, der []byte, perm os.FileMod
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return pem.Encode(f, &pem.Block{Type: blockType, Bytes: der})
 }
 

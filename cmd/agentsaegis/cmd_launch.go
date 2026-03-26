@@ -60,7 +60,7 @@ func runLaunch(_ *cobra.Command, args []string) error {
 	// Launch Claude Desktop
 	appPath := "/Applications/Claude.app/Contents/MacOS/Claude"
 	if _, err := os.Stat(appPath); err != nil {
-		return fmt.Errorf("Claude Desktop not found at %s", appPath)
+		return fmt.Errorf("claude Desktop not found at %s", appPath)
 	}
 
 	cmd := exec.Command(appPath)

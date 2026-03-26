@@ -36,10 +36,8 @@ func runHook(_ *cobra.Command, _ []string) error {
 	}
 
 	var hookInput struct {
-		ToolName string `json:"toolName"`
-		ToolArgs struct {
-			Command string `json:"command"`
-		} `json:"toolArgs"`
+		ToolName string          `json:"toolName"`
+		ToolArgs json.RawMessage `json:"toolArgs"`
 	}
 	if err := json.Unmarshal(input, &hookInput); err != nil {
 		// Can't parse - fail open (no output = allow)
@@ -52,7 +50,19 @@ func runHook(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	if hookInput.ToolArgs.Command == "" {
+	// toolArgs can be a JSON object or a JSON-encoded string
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(hookInput.ToolArgs, &args); err != nil {
+		// Try as a JSON string containing JSON
+		var argsStr string
+		if err := json.Unmarshal(hookInput.ToolArgs, &argsStr); err == nil {
+			_ = json.Unmarshal([]byte(argsStr), &args)
+		}
+	}
+
+	if args.Command == "" {
 		return nil
 	}
 
@@ -64,10 +74,10 @@ func runHook(_ *cobra.Command, _ []string) error {
 	// POST to proxy hook endpoint
 	hookURL := fmt.Sprintf("http://localhost:%d/hooks/pre-tool-use", cfg.ProxyPort)
 	reqBody, _ := json.Marshal(map[string]interface{}{
-		"hook_type": "PreToolUse",
-		"tool_name": "Bash",
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Bash",
 		"tool_input": map[string]string{
-			"command": hookInput.ToolArgs.Command,
+			"command": args.Command,
 		},
 	})
 
@@ -89,17 +99,28 @@ func runHook(_ *cobra.Command, _ []string) error {
 	// Reset health state on successful contact
 	resetHookHealthState()
 
-	if resp.StatusCode == http.StatusForbidden {
-		// Denied - output deny response
+	respBody, _ := io.ReadAll(resp.Body)
+
+	// Parse proxy response to check for deny
+	var hookResp struct {
+		HookSpecificOutput *struct {
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(respBody, &hookResp); err == nil &&
+		hookResp.HookSpecificOutput != nil &&
+		hookResp.HookSpecificOutput.PermissionDecision == "deny" {
+		// Denied - forward the deny to Copilot
 		output := map[string]string{
 			"permissionDecision":       "deny",
-			"permissionDecisionReason": "AgentsAegis security training: suspicious command blocked",
+			"permissionDecisionReason": hookResp.HookSpecificOutput.PermissionDecisionReason,
 		}
 		enc := json.NewEncoder(os.Stdout)
 		return enc.Encode(output)
 	}
 
-	// 200 or anything else = allow (no output)
+	// Allow (no output)
 	return nil
 }
 

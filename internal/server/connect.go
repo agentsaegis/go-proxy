@@ -131,7 +131,7 @@ func (ch *ConnectHandler) HandleConnect(w http.ResponseWriter, r *http.Request) 
 	// Acknowledge the tunnel
 	if _, writeErr := fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); writeErr != nil {
 		ch.logger.Error("failed to write 200 response", "error", writeErr)
-		conn.Close()
+		_ = conn.Close()
 		return
 	}
 
@@ -145,7 +145,7 @@ func (ch *ConnectHandler) HandleConnect(w http.ResponseWriter, r *http.Request) 
 // handleMITMTunnel wraps the hijacked connection in TLS, then reads HTTP
 // requests in a loop and forwards them to the real upstream with trap injection.
 func (ch *ConnectHandler) handleMITMTunnel(conn net.Conn, hostname string) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	tlsCfg, err := ch.caManager.GetTLSConfig(hostname)
 	if err != nil {
@@ -158,7 +158,7 @@ func (ch *ConnectHandler) handleMITMTunnel(conn net.Conn, hostname string) {
 		ch.logger.Debug("TLS handshake failed", "hostname", hostname, "error", err)
 		return
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	reader := bufio.NewReader(tlsConn)
 	for {
@@ -251,7 +251,7 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 		strings.Contains(req.RequestURI, "/chat/completions")
 	if isChatSSE {
 		ch.logger.Info("MITM SSE stream detected, intercepting", "url", upstreamURL)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return ch.forwardSSEResponse(conn, resp)
 	}
 
@@ -271,18 +271,18 @@ func (ch *ConnectHandler) forwardRequest(conn net.Conn, req *http.Request, hostn
 		}
 		headerBuf.WriteString("\r\n")
 		if _, err := conn.Write([]byte(headerBuf.String())); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return fmt.Errorf("writing SSE passthrough headers: %w", err)
 		}
 		// Goroutine owns resp.Body from here - no outer defer to race with.
 		go func() {
-			defer resp.Body.Close()
-			io.Copy(conn, resp.Body)
+			defer func() { _ = resp.Body.Close() }()
+			_, _ = io.Copy(conn, resp.Body)
 		}()
 		return errSSEPassthrough
 	}
 
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.Write(conn)
 }
 
@@ -359,14 +359,14 @@ func (ch *ConnectHandler) forwardSSEResponse(conn net.Conn, resp *http.Response)
 
 // handlePlainTunnel proxies TCP bidirectionally for non-MITM hosts.
 func (ch *ConnectHandler) handlePlainTunnel(conn net.Conn, targetAddr string) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	upstreamConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
 	if err != nil {
 		ch.logger.Debug("plain tunnel: dial failed", "target", targetAddr, "error", err)
 		return
 	}
-	defer upstreamConn.Close()
+	defer func() { _ = upstreamConn.Close() }()
 
 	errc := make(chan error, 1)
 	go func() {

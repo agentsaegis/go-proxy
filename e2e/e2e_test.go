@@ -626,11 +626,12 @@ func TestTrapCommandsAreHarmless(t *testing.T) {
 		}
 	}
 
-	// Verify template count matches expected (15 real + we test them all)
+	// Verify template count matches expected (10 enabled + 5 disabled = 15 total)
+	// LoadTemplates only returns enabled templates
 	var templateCount int32
 	atomic.StoreInt32(&templateCount, int32(len(templates)))
-	if atomic.LoadInt32(&templateCount) < 15 {
-		t.Errorf("expected at least 15 templates, got %d", len(templates))
+	if atomic.LoadInt32(&templateCount) < 10 {
+		t.Errorf("expected at least 10 enabled templates, got %d", len(templates))
 	}
 
 	// Additional safety checks from spec
@@ -651,19 +652,22 @@ func TestTrapCommandsAreHarmless(t *testing.T) {
 					}
 				}
 			}
-			// No real npm/pip package names (must use aegis-trap prefix or nonexistent marker)
+			// No npm/pip packages we don't own (must use aegis-trap prefix, nonexistent, or @agentsaegis/ owned packages)
 			if (strings.HasPrefix(cmd, "npm install") || strings.HasPrefix(cmd, "pip install")) &&
-				!strings.Contains(cmd, "aegis-trap") && !strings.Contains(cmd, "nonexistent") {
-				t.Errorf("template %s: trap command installs real package: %s", tmpl.ID, cmd)
+				!strings.Contains(cmd, "aegis-trap") && !strings.Contains(cmd, "nonexistent") &&
+				!strings.Contains(cmd, "@agentsaegis/") && !strings.Contains(cmd, "agentsaegis-") &&
+				!strings.Contains(cmd, "agentsaegis/") {
+				t.Errorf("template %s: trap command installs non-owned package: %s", tmpl.ID, cmd)
 			}
 			// No real Docker containers (docker run/exec, not filenames containing "docker")
 			if (strings.Contains(cmd, "docker run") || strings.Contains(cmd, "docker exec")) &&
 				!strings.Contains(cmd, "aegis") && !strings.Contains(cmd, "nonexistent") {
 				t.Errorf("template %s: trap command uses real Docker image: %s", tmpl.ID, cmd)
 			}
-			// No real git remotes (must use aegis-nonexistent or fake marker)
+			// No real git remotes (must use sandbox -C, aegis-nonexistent, or fake marker)
 			if strings.Contains(cmd, "git push") &&
-				!strings.Contains(cmd, "nonexistent") && !strings.Contains(cmd, "aegis") {
+				!strings.Contains(cmd, "nonexistent") && !strings.Contains(cmd, "aegis") &&
+				!strings.Contains(cmd, "/tmp/.aegis-") {
 				t.Errorf("template %s: trap command uses real git remote: %s", tmpl.ID, cmd)
 			}
 		}

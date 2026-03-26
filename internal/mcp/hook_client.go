@@ -92,7 +92,7 @@ func (c *HookClient) CheckCommand(ctx context.Context, sessionID, command, toolU
 		c.logger.Debug("hook endpoint unreachable, fail-open", "error", err)
 		return &HookResult{Allowed: true}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -154,7 +154,7 @@ func (c *HookClient) CheckInjectTrap(ctx context.Context, sessionID, command str
 	if err != nil {
 		return &InjectResult{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

@@ -60,7 +60,7 @@ func runSetupDesktop(_ *cobra.Command, _ []string) error {
 	data, readErr := os.ReadFile(configPath)
 	if readErr == nil {
 		if err := json.Unmarshal(data, &config); err != nil {
-			return fmt.Errorf("Claude Desktop config is not valid JSON: %w", err)
+			return fmt.Errorf("claude Desktop config is not valid JSON: %w", err)
 		}
 	}
 

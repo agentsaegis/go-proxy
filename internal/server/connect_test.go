@@ -81,7 +81,7 @@ func sendCONNECT(t *testing.T, proxyAddr, target string) net.Conn {
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 
 	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 	if _, err := fmt.Fprint(conn, req); err != nil {
@@ -161,7 +161,7 @@ func TestConnectHandler_TLSHandshake(t *testing.T) {
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("TLS handshake failed: %v", err)
 	}
-	tlsConn.Close()
+	_ = tlsConn.Close()
 }
 
 // TestConnectHandler_RequestForwarding verifies that an HTTP request sent
@@ -209,10 +209,10 @@ func TestConnectHandler_RequestForwarding(t *testing.T) {
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("TLS handshake: %v", err)
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	// Send a simple GET request through the tunnel
-	fmt.Fprintf(tlsConn, "GET /test HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
+	_, _ = fmt.Fprintf(tlsConn, "GET /test HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
 
 	// Verify the upstream received the request
 	select {
@@ -225,7 +225,7 @@ func TestConnectHandler_RequestForwarding(t *testing.T) {
 		if err != nil {
 			t.Logf("read response: %v (may be ok if upstream not reached)", err)
 		} else {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		select {
 		case <-requestReceived:
@@ -280,9 +280,9 @@ func TestConnectHandler_SSEInterception(t *testing.T) {
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("TLS handshake: %v", err)
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
-	fmt.Fprintf(tlsConn, "GET /v1/chat/completions HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
+	_, _ = fmt.Fprintf(tlsConn, "GET /v1/chat/completions HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
 
 	var responseBody strings.Builder
 	reader := bufio.NewReader(tlsConn)
@@ -290,7 +290,7 @@ func TestConnectHandler_SSEInterception(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	_, _ = io.Copy(&responseBody, resp.Body)
 	body := responseBody.String()
@@ -312,7 +312,7 @@ func TestConnectHandler_NonAIHost_PlainTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() })
 
 	received := make(chan []byte, 1)
 	go func() {
@@ -320,11 +320,11 @@ func TestConnectHandler_NonAIHost_PlainTunnel(t *testing.T) {
 		if acceptErr != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		buf := make([]byte, 64)
 		n, _ := conn.Read(buf)
 		received <- buf[:n]
-		conn.Write([]byte("echo-response"))
+		_, _ = conn.Write([]byte("echo-response"))
 	}()
 
 	// CONNECT to the non-AI host (use listener address as target)
@@ -336,12 +336,12 @@ func TestConnectHandler_NonAIHost_PlainTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	t.Cleanup(func() { rawConn.Close() })
+	t.Cleanup(func() { _ = rawConn.Close() })
 
 	// Use a target that looks like a non-AI host in the CONNECT request
 	// The proxy will try to dial the target; since our listener is 127.0.0.1:PORT,
 	// it should connect to it via plain tunnel.
-	fmt.Fprintf(rawConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetAddr, targetAddr)
+	_, _ = fmt.Fprintf(rawConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetAddr, targetAddr)
 
 	reader := bufio.NewReader(rawConn)
 	resp, err := http.ReadResponse(reader, nil)
@@ -363,11 +363,9 @@ func TestConnectHandler_NonAIHost_PlainTunnel(t *testing.T) {
 		}
 	default:
 		// Give goroutine a moment
-		select {
-		case data := <-received:
-			if string(data) != testMsg {
-				t.Errorf("received %q, want %q", string(data), testMsg)
-			}
+		data := <-received
+		if string(data) != testMsg {
+			t.Errorf("received %q, want %q", string(data), testMsg)
 		}
 	}
 }
@@ -408,16 +406,16 @@ func TestConnectHandler_JSONPassThrough(t *testing.T) {
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("TLS handshake: %v", err)
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
-	fmt.Fprintf(tlsConn, "GET /v1/chat/completions HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
+	_, _ = fmt.Fprintf(tlsConn, "GET /v1/chat/completions HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
 
 	reader := bufio.NewReader(tlsConn)
 	resp, err := http.ReadResponse(reader, nil)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.Header.Get("Content-Type") != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", resp.Header.Get("Content-Type"))
@@ -458,12 +456,12 @@ func TestConnectHandler_ForwardSSEResponse_ChunkedEncoding(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- ch.forwardSSEResponse(serverConn, mockResp)
-		serverConn.Close()
+		_ = serverConn.Close()
 	}()
 
 	// Parse the response as a proper HTTP response - this validates the
@@ -473,7 +471,7 @@ func TestConnectHandler_ForwardSSEResponse_ChunkedEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("http.ReadResponse failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Verify Transfer-Encoding: chunked header is present
 	if te := resp.TransferEncoding; len(te) == 0 || te[0] != "chunked" {
@@ -530,12 +528,12 @@ func TestConnectHandler_ForwardSSEResponse_BodyNotTruncated(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- ch.forwardSSEResponse(serverConn, mockResp)
-		serverConn.Close()
+		_ = serverConn.Close()
 	}()
 
 	reader := bufio.NewReader(clientConn)
@@ -543,7 +541,7 @@ func TestConnectHandler_ForwardSSEResponse_BodyNotTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("http.ReadResponse failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -612,31 +610,31 @@ func TestConnectHandler_SSEInterception_ConnectionStaysOpen(t *testing.T) {
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("TLS handshake: %v", err)
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	reader := bufio.NewReader(tlsConn)
 
 	// Request 1: SSE stream via /chat/completions
-	fmt.Fprintf(tlsConn, "GET /v1/chat/completions HTTP/1.1\r\nHost: api.github.com\r\n\r\n")
+	_, _ = fmt.Fprintf(tlsConn, "GET /v1/chat/completions HTTP/1.1\r\nHost: api.github.com\r\n\r\n")
 	resp1, err := http.ReadResponse(reader, nil)
 	if err != nil {
 		t.Fatalf("read SSE response: %v", err)
 	}
 	body1, _ := io.ReadAll(resp1.Body)
-	resp1.Body.Close()
+	_ = resp1.Body.Close()
 
 	if !strings.Contains(string(body1), "[DONE]") {
 		t.Fatalf("SSE body missing [DONE].\nBody: %s", string(body1))
 	}
 
 	// Request 2: JSON on the SAME connection (proves connection stayed open)
-	fmt.Fprintf(tlsConn, "GET /v1/responses HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
+	_, _ = fmt.Fprintf(tlsConn, "GET /v1/responses HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
 	resp2, err := http.ReadResponse(reader, nil)
 	if err != nil {
 		t.Fatalf("read second response on same connection: %v (connection was closed prematurely)", err)
 	}
 	body2, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 
 	if string(body2) != `{"ok":true}` {
 		t.Errorf("second response body = %q, want {\"ok\":true}", string(body2))
