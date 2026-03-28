@@ -802,6 +802,127 @@ func runClaudeCLI(t *testing.T, proxyPort int, binaryPath, prompt string, timeou
 	}
 }
 
+// runClaudeCLICatchMode runs `claude -p` with a custom hook that simulates
+// a user who NOTICES the trap and edits the command. The hook detects
+// canary/trap markers in the command and sends a modified command to the
+// proxy (same tool_use_id, different command = "caught").
+func runClaudeCLICatchMode(t *testing.T, proxyPort int, prompt string, timeout time.Duration) *claudeCLIResult {
+	t.Helper()
+
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		t.Fatalf("runClaudeCLICatchMode: claude binary not found: %v", err)
+	}
+
+	workDir := t.TempDir()
+	claudeDir := filepath.Join(workDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("runClaudeCLICatchMode: create .claude dir: %v", err)
+	}
+
+	// Write a Python hook script that detects traps and modifies the command
+	hookScript := fmt.Sprintf(`#!/usr/bin/env python3
+import sys, json, urllib.request
+
+data = json.load(sys.stdin)
+command = data.get("tool_input", {}).get("command", "")
+tool_use_id = data.get("tool_use_id", "")
+session_id = data.get("session_id", "")
+
+# If command looks like a trap, send MODIFIED command to proxy (simulating user edit)
+if "aegis_canary" in command or "aegis-trap" in command:
+    modified = "echo user-caught-this-trap"
+    payload = json.dumps({
+        "session_id": session_id,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": modified},
+        "tool_use_id": tool_use_id,
+    }).encode()
+    req = urllib.request.Request(
+        "http://127.0.0.1:%d/hooks/pre-tool-use",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass
+    # Allow the modified command to execute (don't block)
+    sys.exit(0)
+else:
+    # Non-trap command - allow
+    sys.exit(0)
+`, proxyPort)
+
+	hookPath := filepath.Join(workDir, "catch-hook.py")
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0o755); err != nil {
+		t.Fatalf("runClaudeCLICatchMode: write hook script: %v", err)
+	}
+
+	settings := fmt.Sprintf(`{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 %s"
+      }]
+    }]
+  }
+}`, hookPath)
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(settings), 0o600); err != nil {
+		t.Fatalf("runClaudeCLICatchMode: write settings.json: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, claudePath,
+		"-p",
+		"--output-format", "json",
+		"--dangerously-skip-permissions",
+		"--no-session-persistence",
+		prompt,
+	)
+	cmd.Dir = workDir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "ANTHROPIC_BASE_URL=") &&
+			!strings.HasPrefix(e, "AEGIS_PROXY_PORT=") {
+			filtered = append(filtered, e)
+		}
+	}
+	filtered = append(filtered,
+		fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", proxyPort),
+		fmt.Sprintf("AEGIS_PROXY_PORT=%d", proxyPort),
+	)
+	cmd.Env = filtered
+
+	runErr := cmd.Run()
+
+	exitCode := 0
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+
+	return &claudeCLIResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+		Err:      runErr,
+	}
+}
+
 // sendHookRequest sends a PreToolUse hook request to the proxy and returns
 // the parsed JSON response.
 func sendHookRequest(t *testing.T, proxyURL, sessionID, command, toolUseID string) map[string]interface{} {

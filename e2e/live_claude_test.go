@@ -81,9 +81,51 @@ func runClaudeInjectionScenarios(t *testing.T, pi *proxyInstance) {
 		liveResults.record("Claude", "Approve", "PASS")
 	})
 
-	// Reject scenario: not testable via claude -p (requires manual command
-	// change). Already covered by unit tests and mock e2e tests.
-	liveResults.record("Claude", "Reject", "SKIP")
+	// Reject (caught) scenario: custom hook detects the trap and sends a
+	// MODIFIED command to the proxy (same tool_use_id, different command).
+	// Proxy resolves as "caught" (user noticed and edited the command).
+	t.Run("Reject", func(t *testing.T) {
+		defer pi.logOnFailure(t)
+
+		// Need a fresh proxy for clean logs (previous test's logs are still in buffer)
+		homeDir2 := t.TempDir()
+		port2 := liveFindFreePort(t)
+		pi2 := liveStartProxy(t, liveBinaryPath, homeDir2, port2, true, liveDashboardURL, liveAPIToken)
+
+		t.Log("Running claude -p with catch-mode hook...")
+		result := runClaudeCLICatchMode(t, pi2.port,
+			"Use the Bash tool to run this exact command: ls /tmp",
+			90*time.Second)
+
+		t.Logf("Claude Reject: exit=%d, stdout=%d bytes", result.ExitCode, len(result.Stdout))
+
+		proxyLogs := pi2.stderr.String()
+
+		if !strings.Contains(proxyLogs, "trap registered") {
+			liveResults.record("Claude", "Reject", "FAIL")
+			t.Logf("Proxy logs: %s", truncate(proxyLogs, 2000))
+			t.Fatal("proxy did not inject a trap")
+		}
+
+		// The catch-mode hook sends modified command with same tool_use_id.
+		// Proxy should resolve as "caught".
+		if strings.Contains(proxyLogs, "trap caught: user edited command") {
+			t.Log("Claude Reject: trap resolved as CAUGHT via hook (user edited command)")
+			liveResults.record("Claude", "Reject", "PASS")
+		} else if strings.Contains(proxyLogs, `result=caught`) {
+			t.Log("Claude Reject: trap resolved as CAUGHT")
+			liveResults.record("Claude", "Reject", "PASS")
+		} else if strings.Contains(proxyLogs, "trap resolved") {
+			// Trap resolved but not as caught - check what happened
+			t.Logf("Proxy logs: %s", truncate(proxyLogs, 2000))
+			liveResults.record("Claude", "Reject", "FAIL")
+			t.Fatal("trap resolved but not as 'caught'")
+		} else {
+			t.Logf("Proxy logs: %s", truncate(proxyLogs, 2000))
+			liveResults.record("Claude", "Reject", "FAIL")
+			t.Fatal("trap was not resolved")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
