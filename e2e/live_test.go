@@ -17,17 +17,18 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	liveBinaryPath   string
-	liveAPIToken     string
-	liveDashboardURL string
-	liveCopilotAuth  *copilotAuth
+	liveBinaryPath      string
+	liveAPIToken        string
+	liveDashboardURL    string
+	liveAnthropicAPIKey string
+	liveCopilotAuth     *copilotAuth
 )
 
 // ---------------------------------------------------------------------------
 // Result matrix
 // ---------------------------------------------------------------------------
 
-var providers = []string{"Claude", "Copilot/GPT-4o-mini", "Copilot/GPT-4.1", "Copilot/GPT-3.5"}
+var providers = []string{"Claude", "Desktop/Haiku", "Copilot/GPT-4o-mini", "Copilot/GPT-4.1", "Copilot/GPT-3.5"}
 var scenarios = []string{"Passthrough", "Injection", "Approve", "Reject", "Clean"}
 
 type resultTracker struct {
@@ -54,7 +55,7 @@ func printResultMatrix() {
 	fmt.Println()
 
 	// Header row
-	header := fmt.Sprintf("%-16s", "Provider")
+	header := fmt.Sprintf("%-20s", "Provider")
 	for _, s := range scenarios {
 		header += fmt.Sprintf(" | %-12s", s)
 	}
@@ -64,7 +65,7 @@ func printResultMatrix() {
 	// Data rows
 	tested, passed, failed := 0, 0, 0
 	for _, p := range providers {
-		row := fmt.Sprintf("%-16s", p)
+		row := fmt.Sprintf("%-20s", p)
 		providerTested := false
 		for _, s := range scenarios {
 			val := "-"
@@ -104,6 +105,7 @@ func printResultMatrix() {
 
 func TestMain(m *testing.M) {
 	liveAPIToken = os.Getenv("AEGIS_API_TOKEN")
+	liveAnthropicAPIKey = os.Getenv("ANTHROPIC_API_KEY")
 	liveDashboardURL = os.Getenv("AEGIS_DASHBOARD_URL")
 	if liveDashboardURL == "" {
 		liveDashboardURL = "https://api.agentsaegis.com"
@@ -206,6 +208,11 @@ func TestLiveSuperDebug(t *testing.T) {
 		runClaudeInjectionScenarios(t, pi)
 	})
 
+	// Desktop injection scenarios (MCP + inject-trap, no external auth needed)
+	t.Run("Desktop", func(t *testing.T) {
+		runDesktopInjectionScenarios(t)
+	})
+
 	// Copilot injection scenarios (require auth + CONNECT tunnel)
 	if liveCopilotAuth != nil {
 		caPool := loadProxyCA(t, homeDir)
@@ -239,6 +246,11 @@ func TestLivePassthrough(t *testing.T) {
 	// Claude passthrough/clean scenarios
 	t.Run("Claude", func(t *testing.T) {
 		runClaudePassthroughScenarios(t, pi)
+	})
+
+	// Desktop passthrough/clean scenarios (MCP, no external auth needed)
+	t.Run("Desktop", func(t *testing.T) {
+		runDesktopPassthroughScenarios(t, pi)
 	})
 
 	// Copilot passthrough/clean scenarios

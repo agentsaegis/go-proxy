@@ -25,6 +25,7 @@ import (
 var errSSEPassthrough = fmt.Errorf("SSE passthrough active")
 
 var mitmHosts = map[string]bool{
+	"api.anthropic.com":                      true, // Claude Desktop
 	"api.github.com":                         true,
 	"api.individual.githubcopilot.com":       true,
 	"api.business.githubcopilot.com":         true,
