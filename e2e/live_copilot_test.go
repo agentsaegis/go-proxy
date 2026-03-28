@@ -18,11 +18,11 @@ import (
 
 var copilotModels = []struct {
 	Name    string // e.g. "Copilot/GPT"
-	ModelID string // e.g. "gpt-4o"
+	ModelID string // e.g. "gpt-4o-mini"
 }{
-	{Name: "Copilot/GPT", ModelID: "gpt-4o-mini"},
-	{Name: "Copilot/Claude", ModelID: "claude-3.5-sonnet"},
-	{Name: "Copilot/Codex", ModelID: "o4-mini"},
+	{Name: "Copilot/GPT-4o-mini", ModelID: "gpt-4o-mini"},
+	{Name: "Copilot/GPT-4.1", ModelID: "gpt-4.1"},
+	{Name: "Copilot/GPT-3.5", ModelID: "gpt-3.5-turbo"},
 }
 
 // ---------------------------------------------------------------------------

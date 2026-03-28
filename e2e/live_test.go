@@ -27,7 +27,7 @@ var (
 // Result matrix
 // ---------------------------------------------------------------------------
 
-var providers = []string{"Claude", "Copilot/GPT", "Copilot/Claude", "Copilot/Codex"}
+var providers = []string{"Claude", "Copilot/GPT-4o-mini", "Copilot/GPT-4.1", "Copilot/GPT-3.5"}
 var scenarios = []string{"Passthrough", "Injection", "Approve", "Reject", "Clean"}
 
 type resultTracker struct {
