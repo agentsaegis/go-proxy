@@ -163,7 +163,7 @@ func runCopilotInjectionScenarios(t *testing.T, pi *proxyInstance, modelName, mo
 		}
 
 		// Hook goes directly to the proxy, not through CONNECT tunnel
-		hookResp := sendClaudeHook(t, pi.proxyURL, sid, trapCmd, toolUseID)
+		hookResp := sendHookRequest(t, pi.proxyURL, sid, trapCmd, toolUseID)
 
 		// Assert deny
 		output, ok := hookResp["hookSpecificOutput"].(map[string]interface{})
@@ -223,7 +223,7 @@ func runCopilotInjectionScenarios(t *testing.T, pi *proxyInstance, modelName, mo
 		}
 
 		// Send hook with a DIFFERENT command
-		hookResp := sendClaudeHook(t, pi.proxyURL, sid, "echo this-is-not-a-trap", toolUseID)
+		hookResp := sendHookRequest(t, pi.proxyURL, sid, "echo this-is-not-a-trap", toolUseID)
 
 		// Assert allow
 		if _, hasDeny := hookResp["hookSpecificOutput"]; hasDeny {

@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -72,6 +73,30 @@ func liveWriteConfig(t *testing.T, homeDir, dashboardURL, apiToken string) {
 	}
 }
 
+// syncBuffer is a thread-safe bytes.Buffer for capturing subprocess output.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *syncBuffer) Write(p []byte) (n int, err error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
+
+func (sb *syncBuffer) Len() int {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Len()
+}
+
 // proxyInstance holds everything needed to manage and interact with a running
 // proxy subprocess.
 type proxyInstance struct {
@@ -79,7 +104,7 @@ type proxyInstance struct {
 	port     int
 	homeDir  string
 	proxyURL string
-	stderr   *bytes.Buffer
+	stderr   *syncBuffer
 	cancel   context.CancelFunc
 }
 
@@ -109,8 +134,8 @@ func liveStartProxy(
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
 
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	stderrBuf := &syncBuffer{}
+	cmd.Stderr = stderrBuf
 
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
@@ -129,7 +154,7 @@ func liveStartProxy(
 		port:     port,
 		homeDir:  homeDir,
 		proxyURL: fmt.Sprintf("http://127.0.0.1:%d", port),
-		stderr:   &stderrBuf,
+		stderr:   stderrBuf,
 		cancel:   cancel,
 	}
 
@@ -286,7 +311,8 @@ func copilotHTTPClient(t *testing.T, proxyAddr string, caPool *x509.CertPool) *h
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
 			TLSClientConfig: &tls.Config{
-				RootCAs: caPool,
+				RootCAs:    caPool,
+				MinVersion: tls.VersionTLS13,
 			},
 		},
 	}
@@ -679,6 +705,131 @@ func parseOpenAISSE(t *testing.T, body []byte) (text string, toolUses []sseToolU
 }
 
 // ---------------------------------------------------------------------------
+// Part 4: Claude CLI helpers
+// ---------------------------------------------------------------------------
+
+// claudeCLIResult holds the output from a `claude -p` invocation.
+type claudeCLIResult struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+	Err      error
+}
+
+// runClaudeCLI runs `claude -p` as a subprocess with ANTHROPIC_BASE_URL
+// pointing to the test proxy. Configures a project-level PreToolUse hook
+// so the proxy's agentsaegis hook bridge is called for trap detection.
+// Uses the user's subscription auth (no API key).
+func runClaudeCLI(t *testing.T, proxyPort int, binaryPath, prompt string, timeout time.Duration) *claudeCLIResult {
+	t.Helper()
+
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		t.Fatalf("runClaudeCLI: claude binary not found: %v", err)
+	}
+
+	// Create temp working directory with project-level hook config
+	workDir := t.TempDir()
+	claudeDir := filepath.Join(workDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("runClaudeCLI: create .claude dir: %v", err)
+	}
+
+	hookCommand := binaryPath + " hook"
+	settings := fmt.Sprintf(`{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "command": %q
+      }]
+    }]
+  }
+}`, hookCommand)
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(settings), 0o600); err != nil {
+		t.Fatalf("runClaudeCLI: write settings.json: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, claudePath,
+		"-p",
+		"--output-format", "json",
+		"--dangerously-skip-permissions",
+		"--no-session-persistence",
+		prompt,
+	)
+	cmd.Dir = workDir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// Set ANTHROPIC_BASE_URL to route through test proxy.
+	// Set AEGIS_PROXY_PORT so the hook bridge calls the right proxy.
+	// Filter out existing values to avoid conflicts with the user's shell wrapper.
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "ANTHROPIC_BASE_URL=") &&
+			!strings.HasPrefix(e, "AEGIS_PROXY_PORT=") {
+			filtered = append(filtered, e)
+		}
+	}
+	filtered = append(filtered,
+		fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", proxyPort),
+		fmt.Sprintf("AEGIS_PROXY_PORT=%d", proxyPort),
+	)
+	cmd.Env = filtered
+
+	runErr := cmd.Run()
+
+	exitCode := 0
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+
+	return &claudeCLIResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+		Err:      runErr,
+	}
+}
+
+// sendHookRequest sends a PreToolUse hook request to the proxy and returns
+// the parsed JSON response.
+func sendHookRequest(t *testing.T, proxyURL, sessionID, command, toolUseID string) map[string]interface{} {
+	t.Helper()
+
+	hookBody, _ := json.Marshal(map[string]interface{}{
+		"session_id":      sessionID,
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Bash",
+		"tool_input":      map[string]string{"command": command},
+		"tool_use_id":     toolUseID,
+	})
+
+	resp, err := http.Post(proxyURL+"/hooks/pre-tool-use", "application/json",
+		bytes.NewReader(hookBody))
+	if err != nil {
+		t.Fatalf("sendHookRequest: request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("sendHookRequest: decode response: %v", err)
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
 
@@ -686,4 +837,13 @@ func parseOpenAISSE(t *testing.T, body []byte) (text string, toolUses []sseToolU
 // scenario, using the format: live-e2e-<provider>-<scenario>-<unix_nano>.
 func uniqueSessionID(provider, scenario string) string {
 	return fmt.Sprintf("live-e2e-%s-%s-%d", provider, scenario, time.Now().UnixNano())
+}
+
+// truncate shortens a string to maxLen, appending "..." if truncated.
+func truncate(s string, maxLen int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

@@ -20,10 +20,9 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	liveBinaryPath  string
-	liveAPIToken    string
+	liveBinaryPath   string
+	liveAPIToken     string
 	liveDashboardURL string
-	liveAnthropicKey string
 	liveCopilotAuth  *copilotAuth
 )
 
@@ -112,7 +111,6 @@ func TestMain(m *testing.M) {
 	if liveDashboardURL == "" {
 		liveDashboardURL = "https://api.agentsaegis.com"
 	}
-	liveAnthropicKey = os.Getenv("ANTHROPIC_API_KEY")
 
 	// Build the proxy binary
 	repoRoot := findRepoRoot()
