@@ -401,6 +401,9 @@ func (ph *ProxyHandler) maybeInjectTrapInJSON(body []byte) []byte {
 func (ph *ProxyHandler) makeTrapInjectionFunc() TrapInjectionFunc {
 	return func(originalCmd string, tmpl *trap.Template, toolUseID string) string {
 		activeTrap := ph.callbackHandler.RegisterTrap(originalCmd, tmpl, toolUseID)
+		if activeTrap == nil {
+			return ""
+		}
 		ph.logger.Info("trap injected in SSE stream",
 			"trap_id", activeTrap.ID,
 			"tool_use_id", toolUseID,

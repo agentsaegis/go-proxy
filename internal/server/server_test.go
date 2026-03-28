@@ -199,7 +199,7 @@ func TestServer_New_WithPort(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	s := New(cfg, engine, selector, nil, logger)
-	if s.httpServer.Addr != ":9876" {
-		t.Errorf("Addr = %q, want %q", s.httpServer.Addr, ":9876")
+	if s.httpServer.Addr != "127.0.0.1:9876" {
+		t.Errorf("Addr = %q, want %q", s.httpServer.Addr, "127.0.0.1:9876")
 	}
 }

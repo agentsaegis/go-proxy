@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -66,14 +67,17 @@ func runLaunch(_ *cobra.Command, args []string) error {
 	configDir, _ := config.ConfigDir()
 	caPath := configDir + "/ca.pem"
 
+	// Preflight: verify the proxy CA is trusted by the system.
+	// Without this, the MITM TLS handshake will fail and Desktop
+	// won't be able to reach the Anthropic API through the proxy.
+	if !isCATrusted(caPath) {
+		return fmt.Errorf("proxy CA is not trusted by the system.\nRun: sudo agentsaegis trust-cert")
+	}
+
 	cmd := exec.Command(appPath)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("HTTPS_PROXY=%s", proxyURL),
 		fmt.Sprintf("NODE_EXTRA_CA_CERTS=%s", caPath),
-		// TODO: fix proper CA trust so we can remove this.
-		// NODE_EXTRA_CA_CERTS alone doesn't work - Electron's spawned
-		// claude CLI process still rejects the MITM cert.
-		"NODE_TLS_REJECT_UNAUTHORIZED=0",
 	)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("launching Claude Desktop: %w", err)
@@ -81,4 +85,22 @@ func runLaunch(_ *cobra.Command, args []string) error {
 
 	fmt.Printf("Claude Desktop launched with HTTPS_PROXY=%s NODE_EXTRA_CA_CERTS=%s\n", proxyURL, caPath)
 	return nil
+}
+
+// isCATrusted checks whether the proxy CA certificate is trusted by the system.
+func isCATrusted(caPath string) bool {
+	if _, err := os.Stat(caPath); err != nil {
+		return false
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		err := exec.Command("security", "verify-cert", "-c", caPath).Run()
+		return err == nil
+	case "linux":
+		// Check if the cert is installed in the system CA bundle
+		_, err := os.Stat("/usr/local/share/ca-certificates/agentsaegis.crt")
+		return err == nil
+	default:
+		return false
+	}
 }

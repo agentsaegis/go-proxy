@@ -86,7 +86,8 @@ func (hh *HookHandler) HandlePreToolUse(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Parse request body
+	// Parse request body (limit to 1MB to prevent memory exhaustion)
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		hh.logger.Error("failed to read hook request body", "error", err)
@@ -208,6 +209,16 @@ type InjectTrapResponse struct {
 // HandleInjectTrap decides whether to inject a trap for a given command.
 // Used by the hook bridge for Copilot (which can't proxy API traffic).
 func (hh *HookHandler) HandleInjectTrap(w http.ResponseWriter, r *http.Request) {
+	if hh.hookSecret != "" {
+		secret := r.Header.Get("X-Hook-Secret")
+		if secret != hh.hookSecret {
+			hh.logger.Warn("inject-trap request with invalid secret")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		hh.respondInject(w, false, "")

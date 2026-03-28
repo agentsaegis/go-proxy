@@ -109,7 +109,7 @@ func New(
 		mux.ServeHTTP(w, r)
 	})
 
-	addr := fmt.Sprintf(":%d", cfg.ProxyPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.ProxyPort)
 	s.httpServer = &http.Server{
 		Addr:              addr,
 		Handler:           handler,

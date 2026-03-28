@@ -99,7 +99,7 @@ func (m *CAManager) generateCA(certPath, keyPath string) error {
 			Organization: []string{"AgentsAegis"},
 		},
 		NotBefore:             now.Add(-time.Minute),
-		NotAfter:              now.Add(10 * 365 * 24 * time.Hour),
+		NotAfter:              now.Add(2 * 365 * 24 * time.Hour),
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
