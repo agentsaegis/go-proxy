@@ -268,13 +268,17 @@ func extractBashCommand(t *testing.T, resp map[string]interface{}) string {
 
 // sendHookRequest sends a PreToolUse hook request and returns the parsed response.
 func sendHookRequest(t *testing.T, proxyURL, command string) map[string]interface{} {
+	return sendHookRequestWithID(t, proxyURL, command, "toolu_e2e_001")
+}
+
+func sendHookRequestWithID(t *testing.T, proxyURL, command, toolUseID string) map[string]interface{} {
 	t.Helper()
 	hookBody, _ := json.Marshal(map[string]interface{}{
 		"session_id":      "e2e-session",
 		"hook_event_name": "PreToolUse",
 		"tool_name":       "Bash",
 		"tool_input":      map[string]string{"command": command},
-		"tool_use_id":     "toolu_e2e_001",
+		"tool_use_id":     toolUseID,
 	})
 	resp, err := http.Post(proxyURL+"/hooks/pre-tool-use", "application/json",
 		bytes.NewReader(hookBody))
@@ -382,8 +386,8 @@ func TestLegitCommandPassthrough(t *testing.T) {
 		t.Fatalf("expected 1 trap file, got %d", n)
 	}
 
-	// Send a NON-trap command to the hook
-	hookResp := sendHookRequest(t, env.proxyURL, "ls -la")
+	// Send a NON-trap command from a DIFFERENT tool_use (unrelated tool call)
+	hookResp := sendHookRequestWithID(t, env.proxyURL, "ls -la", "toolu_other_999")
 
 	// Assert: allowed through (empty response = allow)
 	if _, hasDeny := hookResp["hookSpecificOutput"]; hasDeny {
@@ -413,8 +417,8 @@ func TestTrapExpiry(t *testing.T) {
 	}
 	activeTrap.InjectedAt = time.Now().Add(-3 * time.Minute)
 
-	// Send a non-matching command - hook should detect expiry and allow through
-	hookResp := sendHookRequest(t, env.proxyURL, "git status")
+	// Send a non-matching command from a different tool_use - hook should detect expiry
+	hookResp := sendHookRequestWithID(t, env.proxyURL, "git status", "toolu_other_expire")
 	if _, hasDeny := hookResp["hookSpecificOutput"]; hasDeny {
 		t.Fatalf("expected allow after expiry, got deny: %v", hookResp)
 	}

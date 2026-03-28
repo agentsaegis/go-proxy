@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,11 @@ import (
 	"github.com/agentsaegis/go-proxy/internal/config"
 )
 
-var offlineFlag bool
+var (
+	offlineFlag  bool
+	tokenFlag    string
+	dashURLFlag  string
+)
 
 var initCmd = &cobra.Command{
 	Use:   "init",
@@ -24,9 +29,20 @@ var initCmd = &cobra.Command{
 	RunE:  runInit,
 }
 
+var setupCmd = &cobra.Command{
+	Use:   "setup",
+	Short: "One-command setup: configure token, shell hooks, integrations, and start proxy",
+	Long:  "Alias for 'init'. Configures API token, installs shell wrapper + PreToolUse hooks, detects Claude Desktop and Copilot, and starts the proxy daemon.",
+	RunE:  runInit,
+}
+
 func init() {
-	initCmd.Flags().BoolVar(&offlineFlag, "offline", false, "Skip dashboard connection (offline mode, no API token required)")
-	rootCmd.AddCommand(initCmd)
+	for _, cmd := range []*cobra.Command{initCmd, setupCmd} {
+		cmd.Flags().BoolVar(&offlineFlag, "offline", false, "Skip dashboard connection (offline mode)")
+		cmd.Flags().StringVar(&tokenFlag, "token", "", "API token (skips interactive prompt)")
+		cmd.Flags().StringVar(&dashURLFlag, "dashboard-url", "", "Dashboard URL (default: https://api.agentsaegis.com)")
+		rootCmd.AddCommand(cmd)
+	}
 }
 
 func runInit(_ *cobra.Command, _ []string) error {
@@ -41,27 +57,38 @@ func runInit(_ *cobra.Command, _ []string) error {
 	} else {
 		reader := bufio.NewReader(os.Stdin)
 
-		// Prompt for dashboard URL
-		fmt.Print("Dashboard URL [https://api.agentsaegis.com]: ")
-		var err error
-		dashboardURL, err = reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("reading dashboard URL: %w", err)
+		// Resolve dashboard URL: flag > env > interactive > default
+		dashboardURL = dashURLFlag
+		if dashboardURL == "" {
+			dashboardURL = os.Getenv("AEGIS_DASHBOARD_URL")
 		}
-		dashboardURL = strings.TrimSpace(dashboardURL)
+		if dashboardURL == "" {
+			fmt.Print("Dashboard URL [https://api.agentsaegis.com]: ")
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("reading dashboard URL: %w", err)
+			}
+			dashboardURL = strings.TrimSpace(line)
+		}
 		if dashboardURL == "" {
 			dashboardURL = "https://api.agentsaegis.com"
 		}
 
-		// Prompt for API token
-		fmt.Print("API Token: ")
-		apiToken, err = reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("reading API token: %w", err)
-		}
-		apiToken = strings.TrimSpace(apiToken)
+		// Resolve API token: flag > env > interactive
+		apiToken = tokenFlag
 		if apiToken == "" {
-			return fmt.Errorf("API token is required")
+			apiToken = os.Getenv("AEGIS_API_TOKEN")
+		}
+		if apiToken == "" {
+			fmt.Print("API Token: ")
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("reading API token: %w", err)
+			}
+			apiToken = strings.TrimSpace(line)
+		}
+		if apiToken == "" {
+			return fmt.Errorf("API token is required (use --token flag, AEGIS_API_TOKEN env, or enter interactively)")
 		}
 
 		// Validate the token
@@ -142,11 +169,37 @@ func runInit(_ *cobra.Command, _ []string) error {
 	daemonFlag = true
 	if startErr := runStart(nil, nil); startErr != nil {
 		fmt.Printf("Proxy daemon: skipped (%v)\n", startErr)
+	} else {
+		// Verify health
+		healthy := false
+		port := 7331
+		if cfg, loadErr := config.Load(); loadErr == nil {
+			port = cfg.ProxyPort
+		}
+		healthURL := fmt.Sprintf("http://localhost:%d/__aegis/health", port)
+		for range 10 {
+			resp, err := http.Get(healthURL)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					healthy = true
+					break
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if healthy {
+			fmt.Printf("Proxy running on port %d\n", port)
+		} else {
+			fmt.Println("Warning: proxy started but health check failed")
+		}
 	}
 	daemonFlag = false
 
 	fmt.Println()
 	fmt.Println("Setup complete. Restart your terminal (or: source ~/.zshrc)")
+	fmt.Println("One-line install for your team:")
+	fmt.Println("  brew install agentsaegis/tap/agentsaegis && agentsaegis setup --token <TOKEN>")
 	fmt.Println()
 
 	return nil

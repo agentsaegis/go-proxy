@@ -63,7 +63,7 @@ cmd/
     main.go              # Entry point, root cobra command, version var
     cmd_start.go         # `start` command - starts proxy (foreground or --daemon)
     cmd_stop.go          # `stop` command - sends SIGTERM to daemon PID
-    cmd_init.go          # `init` command - interactive setup (dashboard URL + API token)
+    cmd_init.go          # `init` / `setup` commands - one-command setup (token + shell + hooks + integrations + daemon). Accepts --token flag for scripted install
     cmd_status.go        # `status` command - shows proxy running state, port, org connection
     cmd_report.go        # `report` command - fetches personal trap stats from dashboard
     cmd_setup_shell.go   # `setup-shell` / `remove-shell` - manages shell wrapper in .zshrc/.bashrc/.config/fish + configures PreToolUse hook in ~/.claude/settings.json

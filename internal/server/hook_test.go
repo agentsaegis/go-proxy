@@ -332,6 +332,69 @@ func TestHookHandler_CooldownDecrement(t *testing.T) {
 	}
 }
 
+func TestHookHandler_SameToolUseID_DifferentCommand_Caught(t *testing.T) {
+	hh, engine := makeTestHookHandler(t)
+	hh.disableJitter = true
+
+	engine.SetActiveTrap(&trap.ActiveTrap{
+		ID:          "trap_catch_test",
+		ToolUseID:   "toolu_trap_abc",
+		TrapCommand: "touch /tmp/.aegis_canary_123",
+		InjectedAt:  time.Now(),
+	})
+
+	// Same tool_use_id but different command = user edited the trap
+	body := `{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls /tmp"},"tool_use_id":"toolu_trap_abc"}`
+	req := httptest.NewRequest(http.MethodPost, "/hooks/pre-tool-use", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hook-Secret", "test-secret")
+
+	rr := httptest.NewRecorder()
+	hh.HandlePreToolUse(rr, req)
+
+	// Should allow the modified command (don't block the user's edit)
+	if strings.Contains(rr.Body.String(), "deny") {
+		t.Errorf("should allow edited command, got: %s", rr.Body.String())
+	}
+
+	// Trap should be resolved as "caught"
+	activeTrap := engine.GetActiveTrap()
+	if activeTrap != nil && !activeTrap.Resolved.Load() {
+		t.Error("trap should be resolved after user edited command")
+	}
+}
+
+func TestHookHandler_DifferentToolUseID_NoResolve(t *testing.T) {
+	hh, engine := makeTestHookHandler(t)
+
+	engine.SetActiveTrap(&trap.ActiveTrap{
+		ID:          "trap_unrelated_test",
+		ToolUseID:   "toolu_trap_xyz",
+		TrapCommand: "touch /tmp/.aegis_canary_456",
+		InjectedAt:  time.Now(),
+	})
+
+	// Different tool_use_id and different command = unrelated tool call
+	body := `{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hello"},"tool_use_id":"toolu_other_789"}`
+	req := httptest.NewRequest(http.MethodPost, "/hooks/pre-tool-use", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hook-Secret", "test-secret")
+
+	rr := httptest.NewRecorder()
+	hh.HandlePreToolUse(rr, req)
+
+	// Should allow
+	if strings.Contains(rr.Body.String(), "deny") {
+		t.Errorf("should allow unrelated command, got: %s", rr.Body.String())
+	}
+
+	// Trap should NOT be resolved (it's an unrelated command)
+	activeTrap := engine.GetActiveTrap()
+	if activeTrap == nil {
+		t.Error("trap should still be active for unrelated tool_use_id")
+	}
+}
+
 func TestHookHandler_NoSecret_AllowAll(t *testing.T) {
 	// Handler with empty secret should not require auth
 	engine := trap.NewEngine(trap.OrgConfig{TrapFrequency: 1})
