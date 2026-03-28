@@ -1,3 +1,6 @@
+-include .env
+export
+
 .PHONY: lint test test-e2e test-live build clean qa qa-live qa-docker qa-docker-claude qa-docker-copilot
 
 lint:

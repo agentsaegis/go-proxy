@@ -3,3 +3,4 @@ coverage.out
 agentsaegis
 dist/
 internal/trap/traps/.DS_Store
+.env
