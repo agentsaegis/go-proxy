@@ -20,7 +20,7 @@ var copilotModels = []struct {
 	Name    string // e.g. "Copilot/GPT"
 	ModelID string // e.g. "gpt-4o"
 }{
-	{Name: "Copilot/GPT", ModelID: "gpt-4o"},
+	{Name: "Copilot/GPT", ModelID: "gpt-4o-mini"},
 	{Name: "Copilot/Claude", ModelID: "claude-3.5-sonnet"},
 	{Name: "Copilot/Codex", ModelID: "o4-mini"},
 }
@@ -30,14 +30,37 @@ var copilotModels = []struct {
 // ---------------------------------------------------------------------------
 
 // copilotRequestBody builds an OpenAI chat completion request body.
-func copilotRequestBody(model, prompt string) []byte {
+// When withTools is true, a bash function tool definition is included so the
+// model can return tool_calls that the proxy can intercept.
+func copilotRequestBody(model, prompt string, withTools bool) []byte {
 	body := map[string]interface{}{
 		"model":      model,
-		"max_tokens": 256,
+		"max_tokens": 1024,
 		"stream":     true,
 		"messages": []map[string]interface{}{
 			{"role": "user", "content": prompt},
 		},
+	}
+	if withTools {
+		body["tools"] = []map[string]interface{}{
+			{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":        "bash",
+					"description": "Execute a bash command on the system",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"command": map[string]interface{}{
+								"type":        "string",
+								"description": "The bash command to execute",
+							},
+						},
+						"required": []string{"command"},
+					},
+				},
+			},
+		}
 	}
 	data, _ := json.Marshal(body)
 	return data
@@ -45,10 +68,10 @@ func copilotRequestBody(model, prompt string) []byte {
 
 // sendCopilotSSE sends a streaming request through the CONNECT tunnel and
 // returns the entire response body as bytes.
-func sendCopilotSSE(t *testing.T, client *http.Client, endpoint, token, model, prompt string) []byte {
+func sendCopilotSSE(t *testing.T, client *http.Client, endpoint, token, model, prompt string, withTools bool) []byte {
 	t.Helper()
 
-	body := copilotRequestBody(model, prompt)
+	body := copilotRequestBody(model, prompt, withTools)
 	reqURL := endpoint + "/chat/completions"
 	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(body))
 	if err != nil {
@@ -68,6 +91,12 @@ func sendCopilotSSE(t *testing.T, client *http.Client, endpoint, token, model, p
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
+		// Model unavailable or not supported on this account - return nil
+		// so callers can skip gracefully instead of hard-failing.
+		if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound {
+			t.Logf("sendCopilotSSE: status %d: %s", resp.StatusCode, string(respBody))
+			return nil
+		}
 		t.Fatalf("sendCopilotSSE: status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -95,7 +124,13 @@ func runCopilotInjectionScenarios(t *testing.T, pi *proxyInstance, modelName, mo
 		defer pi.logOnFailure(t)
 
 		body := sendCopilotSSE(t, client, liveCopilotAuth.Endpoint, liveCopilotAuth.Token,
-			modelID, "Write a single bash command to list files in /tmp. Use the bash tool.")
+			modelID, "Write a single bash command to list files in /tmp. Use the bash tool.", true)
+
+		if body == nil {
+			liveResults.record(modelName, "Injection", "SKIP")
+			t.Skip("model not available on this account")
+			return
+		}
 
 		text, toolUses := parseOpenAISSE(t, body)
 		t.Logf("%s Injection: text=%q, toolUses=%d", modelName, truncate(text, 80), len(toolUses))
@@ -137,7 +172,13 @@ func runCopilotInjectionScenarios(t *testing.T, pi *proxyInstance, modelName, mo
 		sid := uniqueSessionID(strings.ReplaceAll(modelName, "/", "-"), "approve")
 
 		body := sendCopilotSSE(t, client, liveCopilotAuth.Endpoint, liveCopilotAuth.Token,
-			modelID, "Write a single bash command to list files in /tmp. Use the bash tool.")
+			modelID, "Write a single bash command to list files in /tmp. Use the bash tool.", true)
+
+		if body == nil {
+			liveResults.record(modelName, "Approve", "SKIP")
+			t.Skip("model not available on this account")
+			return
+		}
 
 		_, toolUses := parseOpenAISSE(t, body)
 		if len(toolUses) == 0 {
@@ -199,7 +240,13 @@ func runCopilotInjectionScenarios(t *testing.T, pi *proxyInstance, modelName, mo
 		sid := uniqueSessionID(strings.ReplaceAll(modelName, "/", "-"), "reject")
 
 		body := sendCopilotSSE(t, client, liveCopilotAuth.Endpoint, liveCopilotAuth.Token,
-			modelID, "Write a single bash command to list files in /tmp. Use the bash tool.")
+			modelID, "Write a single bash command to list files in /tmp. Use the bash tool.", true)
+
+		if body == nil {
+			liveResults.record(modelName, "Reject", "SKIP")
+			t.Skip("model not available on this account")
+			return
+		}
 
 		_, toolUses := parseOpenAISSE(t, body)
 		if len(toolUses) == 0 {
@@ -222,8 +269,11 @@ func runCopilotInjectionScenarios(t *testing.T, pi *proxyInstance, modelName, mo
 			return
 		}
 
-		// Send hook with a DIFFERENT command
-		hookResp := sendHookRequest(t, pi.proxyURL, sid, "echo this-is-not-a-trap", toolUseID)
+		// Send hook with a DIFFERENT command AND a different tool_use_id.
+		// Using the trap's tool_use_id with a different command would trigger
+		// the "caught" path (user edited trap command). We want to test a
+		// completely unrelated command, so we use a fake tool_use_id.
+		hookResp := sendHookRequest(t, pi.proxyURL, sid, "echo this-is-not-a-trap", "unrelated-"+toolUseID)
 
 		// Assert allow
 		if _, hasDeny := hookResp["hookSpecificOutput"]; hasDeny {
@@ -255,7 +305,13 @@ func runCopilotPassthroughScenarios(t *testing.T, pi *proxyInstance, modelName, 
 		defer pi.logOnFailure(t)
 
 		body := sendCopilotSSE(t, client, liveCopilotAuth.Endpoint, liveCopilotAuth.Token,
-			modelID, "Reply with just the word 'hello'. Do not use any tools.")
+			modelID, "Reply with just the word 'hello'. Do not use any tools.", false)
+
+		if body == nil {
+			liveResults.record(modelName, "Passthrough", "SKIP")
+			t.Skip("model not available on this account")
+			return
+		}
 
 		text, toolUses := parseOpenAISSE(t, body)
 		t.Logf("%s Passthrough: text=%q, toolUses=%d", modelName, truncate(text, 80), len(toolUses))
@@ -283,7 +339,13 @@ func runCopilotPassthroughScenarios(t *testing.T, pi *proxyInstance, modelName, 
 		defer pi.logOnFailure(t)
 
 		body := sendCopilotSSE(t, client, liveCopilotAuth.Endpoint, liveCopilotAuth.Token,
-			modelID, "Reply with just the word 'hello'. Do not use any tools.")
+			modelID, "Reply with just the word 'hello'. Do not use any tools.", false)
+
+		if body == nil {
+			liveResults.record(modelName, "Clean", "SKIP")
+			t.Skip("model not available on this account")
+			return
+		}
 
 		text, toolUses := parseOpenAISSE(t, body)
 		t.Logf("%s Clean: text=%q, toolUses=%d", modelName, truncate(text, 80), len(toolUses))

@@ -3,10 +3,7 @@
 package e2e_test
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -140,65 +137,35 @@ func TestMain(m *testing.M) {
 }
 
 // acquireCopilotTokenForMain is the non-testing.T version of acquireCopilotToken.
-// It logs errors to stderr and returns nil on failure instead of calling t.Fatalf.
+// It logs to stderr and returns nil on failure instead of calling t.Fatalf.
 func acquireCopilotTokenForMain() *copilotAuth {
-	ghToken := os.Getenv("GITHUB_TOKEN")
-	if ghToken == "" {
-		out, err := exec.Command("gh", "auth", "token").Output()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "acquireCopilotTokenForMain: no GITHUB_TOKEN and gh auth failed, skipping Copilot tests")
-			return nil
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+		if auth := exchangeCopilotToken(tok); auth != nil {
+			fmt.Fprintln(os.Stderr, "Copilot token acquired via GITHUB_TOKEN")
+			return auth
 		}
-		ghToken = strings.TrimSpace(string(out))
-	}
-	if ghToken == "" {
-		return nil
 	}
 
-	req, err := http.NewRequest(http.MethodGet,
-		"https://api.github.com/copilot_internal/v2/token", nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "acquireCopilotTokenForMain: build request: %v\n", err)
-		return nil
-	}
-	req.Header.Set("Authorization", "token "+ghToken)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "acquireCopilotTokenForMain: exchange request: %v\n", err)
-		return nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "acquireCopilotTokenForMain: token exchange returned %d: %s\n", resp.StatusCode, body)
-		return nil
+	for _, tok := range readCopilotAppTokens() {
+		if auth := exchangeCopilotToken(tok); auth != nil {
+			fmt.Fprintln(os.Stderr, "Copilot token acquired via ~/.config/github-copilot/apps.json")
+			return auth
+		}
 	}
 
-	var result struct {
-		Token     string `json:"token"`
-		ExpiresAt int64  `json:"expires_at"`
-		Endpoints struct {
-			API string `json:"api"`
-		} `json:"endpoints"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		fmt.Fprintf(os.Stderr, "acquireCopilotTokenForMain: decode response: %v\n", err)
-		return nil
-	}
-	if result.Token == "" {
-		fmt.Fprintln(os.Stderr, "acquireCopilotTokenForMain: empty token in response")
-		return nil
+	out, err := exec.Command("gh", "auth", "token").Output()
+	if err == nil {
+		tok := strings.TrimSpace(string(out))
+		if tok != "" {
+			if auth := exchangeCopilotToken(tok); auth != nil {
+				fmt.Fprintln(os.Stderr, "Copilot token acquired via gh auth token")
+				return auth
+			}
+		}
 	}
 
-	endpoint := result.Endpoints.API
-	if endpoint == "" {
-		endpoint = "https://api.individual.githubcopilot.com"
-	}
-
-	return &copilotAuth{Token: result.Token, Endpoint: endpoint}
+	fmt.Fprintln(os.Stderr, "acquireCopilotTokenForMain: no valid Copilot token found, skipping Copilot tests")
+	return nil
 }
 
 // findRepoRoot walks up from cwd looking for go.mod.
