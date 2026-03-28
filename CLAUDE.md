@@ -63,14 +63,14 @@ cmd/
     main.go              # Entry point, root cobra command, version var
     cmd_start.go         # `start` command - starts proxy (foreground or --daemon)
     cmd_stop.go          # `stop` command - sends SIGTERM to daemon PID
-    cmd_init.go          # `init` command - interactive setup (dashboard URL + API token)
+    cmd_init.go          # `init` / `setup` commands - one-command setup (token + shell + hooks + integrations + daemon). Accepts --token flag for scripted install
     cmd_status.go        # `status` command - shows proxy running state, port, org connection
     cmd_report.go        # `report` command - fetches personal trap stats from dashboard
-    cmd_setup_shell.go   # `setup-shell` / `remove-shell` - manages shell wrapper in .zshrc/.bashrc/.config/fish
+    cmd_setup_shell.go   # `setup-shell` / `remove-shell` - manages shell wrapper in .zshrc/.bashrc/.config/fish + configures PreToolUse hook in ~/.claude/settings.json
     cmd_setup_desktop.go # `setup-desktop` / `remove-desktop` - patches Claude Desktop MCP config
     cmd_mcp.go           # `mcp` command - runs as MCP server (stdio transport) for Claude Desktop
     cmd_launch.go        # `launch claude-desktop` - launches Desktop app with proxy env var
-    cmd_hook.go          # `hook` command - bridge for Copilot/VS Code PreToolUse hooks (stdin/stdout)
+    cmd_hook.go          # `hook` command - bridge for Claude Code and Copilot PreToolUse hooks (stdin/stdout, supports both snake_case and camelCase formats)
     cmd_setup_copilot.go # `setup-copilot` / `remove-copilot` - configures Copilot hooks + MCP in VS Code
     cmd_setup_vscode.go  # `setup-vscode` / `remove-vscode` - configures VS Code http.proxy for Copilot interception
     cmd_trust_cert.go    # `trust-cert` / `untrust-cert` - adds/removes proxy CA from system trust store
@@ -145,6 +145,10 @@ internal/
 
 e2e/
   e2e_test.go            # End-to-end tests (build tag: e2e) - mock Anthropic + dashboard servers
+  live_test.go           # Live E2E tests (build tag: live) - TestMain, matrix runner, result tracker
+  live_claude_test.go    # Live Claude CLI scenarios - runs `claude -p` through proxy with PreToolUse hook
+  live_copilot_test.go   # Live Copilot scenarios - OpenAI SSE format through CONNECT tunnel
+  live_helpers_test.go   # Live test helpers - proxy subprocess, token exchange, SSE parsers
 
 install.sh               # Curl-pipe installer script - detects OS/arch, downloads release, verifies checksum
 
@@ -207,6 +211,10 @@ docs/                    # Documentation (untracked, not in git yet)
    - After Claude exits with non-zero: checks if proxy died and restarts it
 4. Also generates `copilot()` wrapper with same auto-start + hook injection
 5. Removes any existing marker block or legacy export, appends new wrapper
+6. Configures PreToolUse hook in `~/.claude/settings.json` via `installClaudeHook()`:
+   - Reads existing settings, merges (preserves user's other hooks)
+   - Adds `{"matcher": "Bash", "hooks": [{"type": "command", "command": "<exe> hook"}]}`
+   - `remove-shell` removes the hook entry via `removeClaudeHook()`
 
 ### 5. Trap detection via MCP server (Claude Desktop)
 
@@ -230,11 +238,11 @@ docs/                    # Documentation (untracked, not in git yet)
 ### 7. Trap detection via Copilot hooks (GitHub Copilot)
 
 1. Copilot agent mode fires PreToolUse hook before executing a bash command
-2. Hook spawns `agentsaegis hook` which reads hook input JSON from stdin
-3. `agentsaegis hook` extracts `toolName` and `toolArgs.command`
+2. Hook spawns `agentsaegis hook` which reads hook input JSON from stdin (supports both Copilot camelCase `toolName`/`toolArgs` and Claude Code snake_case `tool_name`/`tool_input` formats)
+3. `agentsaegis hook` extracts the command and forwards `session_id`/`tool_use_id` if present
 4. POSTs to `http://localhost:PORT/hooks/pre-tool-use` (same endpoint as Claude Code)
-5. If proxy returns deny: writes `{"permissionDecision":"deny","permissionDecisionReason":"..."}` to stdout
-6. If proxy returns allow (or is unreachable): no output (fail-open, Copilot allows execution)
+5. If proxy returns deny: writes format-appropriate response to stdout (Copilot: `{"permissionDecision":"deny",...}`, Claude Code: `{"decision":"block","reason":"..."}`)
+6. If proxy returns allow (or is unreachable): no output (fail-open)
 7. Copilot also uses `agentsaegis mcp` as MCP server for bash tool execution (same as Claude Desktop flow 5)
 
 ## Data Models
@@ -382,6 +390,14 @@ make test-e2e
 # Equivalent: go test -race -tags e2e -v -count=1 ./e2e/...
 ```
 
+### Run live E2E tests (real API calls)
+```bash
+make test-live
+# Requires: `claude` CLI authenticated (subscription), AEGIS_API_TOKEN
+# Optional: GITHUB_TOKEN (for Copilot tests)
+# Equivalent: go test -race -tags live -v -count=1 -timeout 10m ./e2e/...
+```
+
 ### Lint
 ```bash
 make lint
@@ -437,6 +453,7 @@ GoReleaser builds binaries for darwin/linux amd64/arm64, creates GitHub Release,
 
 - **Unit tests:** Every `*.go` file has a corresponding `*_test.go` in the same package
 - **E2E tests:** `e2e/e2e_test.go` with build tag `e2e` (not included in `make test`)
+- **Live E2E tests:** `e2e/live_*.go` with build tag `live` (real API calls through external binary)
 - **Framework:** Standard `testing` package only, no external test framework
 - **Coverage target:** 90% (enforced by Codecov)
 - **Test pattern:** Table-driven tests, `t.TempDir()` for filesystem tests, `httptest.NewServer` for HTTP mocking, `t.Setenv()` for env vars

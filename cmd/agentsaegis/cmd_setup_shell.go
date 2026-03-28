@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -256,6 +257,14 @@ func runSetupShell(_ *cobra.Command, _ []string) error {
 		fmt.Printf("Added Claude Code + Copilot wrappers to %s. Run: source %s\n", relPath, relPath)
 	}
 
+	// Configure Claude Code PreToolUse hook in ~/.claude/settings.json
+	if err := installClaudeHook(homeDir, exe); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not configure Claude Code hook: %v\n", err)
+		fmt.Fprintln(os.Stderr, "You can manually add the PreToolUse hook to ~/.claude/settings.json")
+	} else {
+		fmt.Println("Configured PreToolUse hook in ~/.claude/settings.json")
+	}
+
 	return nil
 }
 
@@ -327,5 +336,160 @@ func runRemoveShell(_ *cobra.Command, _ []string) error {
 		fmt.Println("No AgentsAegis configuration found in shell profiles.")
 	}
 
+	// Remove Claude Code hook from settings.json
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		if removeErr := removeClaudeHook(homeDir); removeErr == nil {
+			fmt.Println("Removed PreToolUse hook from ~/.claude/settings.json")
+		}
+	}
+
 	return nil
+}
+
+// installClaudeHook adds an AgentsAegis PreToolUse hook to ~/.claude/settings.json.
+// It merges with existing settings, preserving other hooks and configuration.
+func installClaudeHook(homeDir, exePath string) error {
+	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
+
+	// Read existing settings (or start fresh)
+	var settings map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			settings = make(map[string]interface{})
+		}
+	} else {
+		settings = make(map[string]interface{})
+	}
+
+	// Get or create hooks map
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks == nil {
+		hooks = make(map[string]interface{})
+	}
+
+	hookCommand := exePath + " hook"
+
+	// Build the AgentsAegis PreToolUse hook entry
+	aegisHook := map[string]interface{}{
+		"matcher": "Bash",
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type":    "command",
+				"command": hookCommand,
+			},
+		},
+	}
+
+	// Get existing PreToolUse hooks and replace/add the AgentsAegis one
+	var preToolUseHooks []interface{}
+	if existing, ok := hooks["PreToolUse"].([]interface{}); ok {
+		// Remove any existing AgentsAegis hook (by matching command containing "agentsaegis hook")
+		for _, h := range existing {
+			hookMap, ok := h.(map[string]interface{})
+			if !ok {
+				preToolUseHooks = append(preToolUseHooks, h)
+				continue
+			}
+			hooksList, _ := hookMap["hooks"].([]interface{})
+			isAegis := false
+			for _, inner := range hooksList {
+				innerMap, ok := inner.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				cmd, _ := innerMap["command"].(string)
+				if strings.Contains(cmd, "agentsaegis hook") {
+					isAegis = true
+					break
+				}
+			}
+			if !isAegis {
+				preToolUseHooks = append(preToolUseHooks, h)
+			}
+		}
+	}
+	preToolUseHooks = append(preToolUseHooks, aegisHook)
+	hooks["PreToolUse"] = preToolUseHooks
+	settings["hooks"] = hooks
+
+	// Write back
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		return fmt.Errorf("creating ~/.claude directory: %w", err)
+	}
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling settings: %w", err)
+	}
+
+	return os.WriteFile(settingsPath, out, 0o600)
+}
+
+// removeClaudeHook removes the AgentsAegis PreToolUse hook from ~/.claude/settings.json.
+func removeClaudeHook(homeDir string) error {
+	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return nil // No settings file - nothing to remove
+	}
+
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil
+	}
+
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks == nil {
+		return nil
+	}
+
+	existing, ok := hooks["PreToolUse"].([]interface{})
+	if !ok || len(existing) == 0 {
+		return nil
+	}
+
+	// Filter out AgentsAegis hooks
+	var filtered []interface{}
+	for _, h := range existing {
+		hookMap, ok := h.(map[string]interface{})
+		if !ok {
+			filtered = append(filtered, h)
+			continue
+		}
+		hooksList, _ := hookMap["hooks"].([]interface{})
+		isAegis := false
+		for _, inner := range hooksList {
+			innerMap, ok := inner.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			cmd, _ := innerMap["command"].(string)
+			if strings.Contains(cmd, "agentsaegis hook") {
+				isAegis = true
+				break
+			}
+		}
+		if !isAegis {
+			filtered = append(filtered, h)
+		}
+	}
+
+	if len(filtered) == 0 {
+		delete(hooks, "PreToolUse")
+	} else {
+		hooks["PreToolUse"] = filtered
+	}
+
+	if len(hooks) == 0 {
+		delete(settings, "hooks")
+	}
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(settingsPath, out, 0o600)
 }

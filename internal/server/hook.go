@@ -152,7 +152,25 @@ func (hh *HookHandler) HandlePreToolUse(w http.ResponseWriter, r *http.Request) 
 	)
 
 	if !result.Matched {
-		// Not the trap command - allow through, but check if trap has expired
+		// Check if this is the SAME tool_use but with a modified command.
+		// Same tool_use_id + different command = user noticed the trap and
+		// edited it before executing. That's a catch.
+		if req.ToolUseID != "" && req.ToolUseID == activeTrap.ToolUseID {
+			hh.logger.Info("trap caught: user edited command",
+				"trap_id", activeTrap.ID,
+				"tool_use_id", req.ToolUseID,
+				"original_trap", activeTrap.TrapCommand,
+				"user_command", toolInput.Command,
+			)
+			hh.engine.SetActiveTrapSessionID(req.SessionID)
+			hh.callbackHandler.ResolveTrap(activeTrap, "caught")
+			hh.cooldownCount = hh.maxCooldown
+			hh.respondAllow(w)
+			return
+		}
+
+		// Different tool_use - unrelated command, allow through.
+		// Check if trap has expired.
 		if time.Since(activeTrap.InjectedAt) > 2*time.Minute {
 			hh.logger.Info("trap expired without hook match", "trap_id", activeTrap.ID)
 			hh.engine.SetActiveTrapSessionID(req.SessionID)

@@ -19,13 +19,49 @@ import (
 
 var hookCmd = &cobra.Command{
 	Use:   "hook",
-	Short: "Bridge for Copilot/VS Code PreToolUse hooks",
-	Long:  "Reads hook input JSON from stdin, checks the command against the proxy's pre-tool-use endpoint, and outputs deny/allow to stdout.",
+	Short: "Bridge for Claude Code and Copilot PreToolUse hooks",
+	Long:  "Reads hook input JSON from stdin, checks the command against the proxy's pre-tool-use endpoint, and outputs deny/allow to stdout. Supports both Claude Code (snake_case) and Copilot (camelCase) hook formats.",
 	RunE:  runHook,
 }
 
 func init() {
 	rootCmd.AddCommand(hookCmd)
+}
+
+// hookInput represents the union of Claude Code and Copilot hook stdin formats.
+// Claude Code uses snake_case, Copilot uses camelCase.
+type hookInput struct {
+	// Claude Code format (snake_case)
+	SessionID     string          `json:"session_id"`
+	HookEventName string          `json:"hook_event_name"`
+	ToolName      string          `json:"tool_name"`
+	ToolInput     json.RawMessage `json:"tool_input"`
+	ToolUseID     string          `json:"tool_use_id"`
+
+	// Copilot format (camelCase)
+	ToolNameCamel string          `json:"toolName"`
+	ToolArgs      json.RawMessage `json:"toolArgs"`
+}
+
+// resolvedToolName returns the tool name from whichever format was provided.
+func (h *hookInput) resolvedToolName() string {
+	if h.ToolName != "" {
+		return h.ToolName
+	}
+	return h.ToolNameCamel
+}
+
+// resolvedToolInput returns the raw tool input JSON from whichever format was provided.
+func (h *hookInput) resolvedToolInput() json.RawMessage {
+	if len(h.ToolInput) > 0 {
+		return h.ToolInput
+	}
+	return h.ToolArgs
+}
+
+// isCopilotFormat returns true if the input uses Copilot's camelCase format.
+func (h *hookInput) isCopilotFormat() bool {
+	return h.ToolNameCamel != "" && h.ToolName == ""
 }
 
 func runHook(_ *cobra.Command, _ []string) error {
@@ -35,29 +71,27 @@ func runHook(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("reading stdin: %w", err)
 	}
 
-	var hookInput struct {
-		ToolName string          `json:"toolName"`
-		ToolArgs json.RawMessage `json:"toolArgs"`
-	}
-	if err := json.Unmarshal(input, &hookInput); err != nil {
+	var hi hookInput
+	if err := json.Unmarshal(input, &hi); err != nil {
 		// Can't parse - fail open (no output = allow)
 		return nil
 	}
 
 	// Only process bash/shell tools
-	toolLower := strings.ToLower(hookInput.ToolName)
+	toolLower := strings.ToLower(hi.resolvedToolName())
 	if toolLower != "bash" && toolLower != "shell" && toolLower != "run_in_terminal" {
 		return nil
 	}
 
-	// toolArgs can be a JSON object or a JSON-encoded string
+	// Extract command from tool input (supports both object and string-wrapped JSON)
+	rawInput := hi.resolvedToolInput()
 	var args struct {
 		Command string `json:"command"`
 	}
-	if err := json.Unmarshal(hookInput.ToolArgs, &args); err != nil {
+	if err := json.Unmarshal(rawInput, &args); err != nil {
 		// Try as a JSON string containing JSON
 		var argsStr string
-		if err := json.Unmarshal(hookInput.ToolArgs, &argsStr); err == nil {
+		if err := json.Unmarshal(rawInput, &argsStr); err == nil {
 			_ = json.Unmarshal([]byte(argsStr), &args)
 		}
 	}
@@ -71,14 +105,14 @@ func runHook(_ *cobra.Command, _ []string) error {
 		cfg = config.DefaultConfig()
 	}
 
-	// POST to proxy hook endpoint
+	// POST to proxy hook endpoint with full context
 	hookURL := fmt.Sprintf("http://localhost:%d/hooks/pre-tool-use", cfg.ProxyPort)
 	reqBody, _ := json.Marshal(map[string]interface{}{
+		"session_id":      hi.SessionID,
 		"hook_event_name": "PreToolUse",
 		"tool_name":       "Bash",
-		"tool_input": map[string]string{
-			"command": args.Command,
-		},
+		"tool_input":      map[string]string{"command": args.Command},
+		"tool_use_id":     hi.ToolUseID,
 	})
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -108,20 +142,31 @@ func runHook(_ *cobra.Command, _ []string) error {
 			PermissionDecisionReason string `json:"permissionDecisionReason"`
 		} `json:"hookSpecificOutput"`
 	}
-	if err := json.Unmarshal(respBody, &hookResp); err == nil &&
-		hookResp.HookSpecificOutput != nil &&
-		hookResp.HookSpecificOutput.PermissionDecision == "deny" {
-		// Denied - forward the deny to Copilot
-		output := map[string]string{
-			"permissionDecision":       "deny",
-			"permissionDecisionReason": hookResp.HookSpecificOutput.PermissionDecisionReason,
-		}
-		enc := json.NewEncoder(os.Stdout)
-		return enc.Encode(output)
+	if err := json.Unmarshal(respBody, &hookResp); err != nil ||
+		hookResp.HookSpecificOutput == nil ||
+		hookResp.HookSpecificOutput.PermissionDecision != "deny" {
+		// Allow (no output)
+		return nil
 	}
 
-	// Allow (no output)
-	return nil
+	reason := hookResp.HookSpecificOutput.PermissionDecisionReason
+
+	// Output deny in the correct format for the caller
+	if hi.isCopilotFormat() {
+		// Copilot expects camelCase flat object
+		output := map[string]string{
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": reason,
+		}
+		return json.NewEncoder(os.Stdout).Encode(output)
+	}
+
+	// Claude Code expects {"decision": "block", "reason": "..."}
+	output := map[string]string{
+		"decision": "block",
+		"reason":   reason,
+	}
+	return json.NewEncoder(os.Stdout).Encode(output)
 }
 
 func hookHealthStateFile() string {
