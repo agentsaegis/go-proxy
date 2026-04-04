@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -35,6 +36,9 @@ func runLaunch(_ *cobra.Command, args []string) error {
 	// Check if proxy is running
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(healthURL)
+	if err == nil {
+		resp.Body.Close()
+	}
 	if err != nil || resp.StatusCode != http.StatusOK {
 		// Start proxy as daemon
 		fmt.Println("Starting proxy daemon...")
@@ -51,8 +55,11 @@ func runLaunch(_ *cobra.Command, args []string) error {
 		// Wait for health
 		for i := 0; i < 6; i++ {
 			time.Sleep(500 * time.Millisecond)
-			if r, e := client.Get(healthURL); e == nil && r.StatusCode == http.StatusOK {
-				break
+			if r, e := client.Get(healthURL); e == nil {
+				r.Body.Close()
+				if r.StatusCode == http.StatusOK {
+					break
+				}
 			}
 		}
 	}
@@ -93,9 +100,18 @@ func runLaunch(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// isCATrusted checks whether the given CA cert is trusted by the system on macOS.
-// Returns true on non-macOS platforms (no check available) or if the check passes.
+// isCATrusted checks whether the given CA cert is trusted by the system.
+// On macOS uses `security verify-cert`. On Linux checks if the cert is
+// installed in the system CA bundle. Returns true on other platforms
+// (no verification available).
 func isCATrusted(caPath string) bool {
-	out := exec.Command("security", "verify-cert", "-c", caPath) // nosemgrep: dangerous-exec-command -- caPath comes from config dir
-	return out.Run() == nil
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("security", "verify-cert", "-c", caPath).Run() == nil // nosemgrep: dangerous-exec-command -- caPath from config dir
+	case "linux":
+		_, err := os.Stat("/usr/local/share/ca-certificates/agentsaegis.crt")
+		return err == nil
+	default:
+		return true
+	}
 }

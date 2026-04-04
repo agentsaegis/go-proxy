@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/agentsaegis/go-proxy/internal/trap"
@@ -171,9 +172,16 @@ func (oi *OAIStreamInterceptor) ProcessLine(line string) ([]string, error) {
 }
 
 func (oi *OAIStreamInterceptor) flushAllCalls() []string {
+	// Sort keys for deterministic output order when multiple tool calls are buffered.
+	keys := make([]int, 0, len(oi.activeCalls))
+	for k := range oi.activeCalls {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+
 	var out []string
-	for _, state := range oi.activeCalls {
-		out = append(out, oi.flushSingleCall(state)...)
+	for _, k := range keys {
+		out = append(out, oi.flushSingleCall(oi.activeCalls[k])...)
 	}
 	oi.activeCalls = make(map[int]*OAIToolCallState)
 	return out
@@ -297,9 +305,11 @@ func replaceOAICommandInArgs(argsJSON, trapCmd string) (string, error) {
 // preserving the original chunk metadata (id, created, model) for consistency.
 func buildOAIDeltaLine(toolIndex int, argFragment, chunkID, chunkModel string, chunkCreated int64) string {
 	escaped := escapeJSONString(argFragment)
+	escapedID := escapeJSONString(chunkID)
+	escapedModel := escapeJSONString(chunkModel)
 	chunk := fmt.Sprintf(
 		`{"id":"%s","choices":[{"index":0,"delta":{"content":null,"tool_calls":[{"index":%d,"function":{"arguments":"%s"}}]},"finish_reason":null}],"created":%d,"model":"%s"}`,
-		chunkID, toolIndex, escaped, chunkCreated, chunkModel,
+		escapedID, toolIndex, escaped, chunkCreated, escapedModel,
 	)
 	return "data: " + chunk
 }
