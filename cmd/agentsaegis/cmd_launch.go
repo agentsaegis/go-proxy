@@ -37,7 +37,7 @@ func runLaunch(_ *cobra.Command, args []string) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(healthURL)
 	if err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	if err != nil || resp.StatusCode != http.StatusOK {
 		// Start proxy as daemon
@@ -56,7 +56,7 @@ func runLaunch(_ *cobra.Command, args []string) error {
 		for i := 0; i < 6; i++ {
 			time.Sleep(500 * time.Millisecond)
 			if r, e := client.Get(healthURL); e == nil {
-				r.Body.Close()
+				_ = r.Body.Close()
 				if r.StatusCode == http.StatusOK {
 					break
 				}
