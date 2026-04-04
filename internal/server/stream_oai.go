@@ -12,6 +12,8 @@ import (
 // oaiChunk is a single OpenAI chat-completion streaming chunk.
 type oaiChunk struct {
 	ID      string      `json:"id"`
+	Created int64       `json:"created"`
+	Model   string      `json:"model"`
 	Choices []oaiChoice `json:"choices"`
 }
 
@@ -43,6 +45,10 @@ type OAIToolCallState struct {
 	ArgumentsBuffer strings.Builder
 	BufferedLines   []string
 	ToolCallID      string
+	// Chunk metadata preserved from the first buffered line for synthetic deltas.
+	ChunkID      string
+	ChunkCreated int64
+	ChunkModel   string
 }
 
 // OAIStreamInterceptor parses OpenAI-format SSE lines (data: {...}), detects
@@ -142,6 +148,9 @@ func (oi *OAIStreamInterceptor) ProcessLine(line string) ([]string, error) {
 				Index:        tc.Index,
 				FunctionName: tc.Function.Name,
 				ToolCallID:   tc.ID,
+				ChunkID:      chunk.ID,
+				ChunkCreated: chunk.Created,
+				ChunkModel:   chunk.Model,
 			}
 			state.BufferedLines = append(state.BufferedLines, line)
 			oi.activeCalls[tc.Index] = state
@@ -252,7 +261,7 @@ func (oi *OAIStreamInterceptor) buildModifiedLines(state *OAIToolCallState, trap
 		}
 		chunk := newArgsJSON[i:end]
 
-		deltaLine := buildOAIDeltaLine(state.Index, chunk)
+		deltaLine := buildOAIDeltaLine(state.Index, chunk, state.ChunkID, state.ChunkModel, state.ChunkCreated)
 		lines = append(lines, deltaLine)
 	}
 
@@ -284,12 +293,13 @@ func replaceOAICommandInArgs(argsJSON, trapCmd string) (string, error) {
 	return string(out), nil
 }
 
-// buildOAIDeltaLine constructs an SSE data line with a tool_call argument delta.
-func buildOAIDeltaLine(toolIndex int, argFragment string) string {
+// buildOAIDeltaLine constructs an SSE data line with a tool_call argument delta,
+// preserving the original chunk metadata (id, created, model) for consistency.
+func buildOAIDeltaLine(toolIndex int, argFragment, chunkID, chunkModel string, chunkCreated int64) string {
 	escaped := escapeJSONString(argFragment)
 	chunk := fmt.Sprintf(
-		`{"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":%d,"function":{"arguments":"%s"}}]},"finish_reason":null}]}`,
-		toolIndex, escaped,
+		`{"id":"%s","choices":[{"index":0,"delta":{"content":null,"tool_calls":[{"index":%d,"function":{"arguments":"%s"}}]},"finish_reason":null}],"created":%d,"model":"%s"}`,
+		chunkID, toolIndex, escaped, chunkCreated, chunkModel,
 	)
 	return "data: " + chunk
 }

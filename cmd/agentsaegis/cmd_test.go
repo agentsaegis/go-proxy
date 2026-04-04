@@ -552,6 +552,10 @@ func TestRunInit_WithMockedStdin(t *testing.T) {
 	dir := setupTestHome(t)
 	_ = dir
 
+	// Clear env vars so viper doesn't override mock values
+	t.Setenv("AEGIS_DASHBOARD_URL", "")
+	t.Setenv("AEGIS_API_TOKEN", "")
+
 	// Create a mock API server that validates the token
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -598,6 +602,10 @@ func TestRunInit_WithMockedStdin(t *testing.T) {
 
 func TestRunInit_EmptyToken(t *testing.T) {
 	setupTestHome(t)
+
+	// Clear env vars so viper doesn't override stdin input
+	t.Setenv("AEGIS_DASHBOARD_URL", "")
+	t.Setenv("AEGIS_API_TOKEN", "")
 
 	r, w, err := os.Pipe()
 	if err != nil {
