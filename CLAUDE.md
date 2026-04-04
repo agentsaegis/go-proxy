@@ -23,9 +23,9 @@ Claude Code CLI  -->  AgentsAegis Proxy (localhost:7331)  -->  Anthropic API (ap
                                |
                                +--> AgentsAegis Dashboard API (optional, for config + reporting)
 
-Claude Desktop  --[ANTHROPIC_BASE_URL]--> AgentsAegis Proxy --> Anthropic API
-       |                                        |
-       +--[MCP stdio]--> agentsaegis mcp -------+
+Claude Desktop  --[--proxy-server CONNECT]--> AgentsAegis Proxy --> Anthropic API
+       |                                              |
+       +--[MCP stdio]--> agentsaegis mcp -------------+
                           (checks commands via     (POST /hooks/pre-tool-use)
                            proxy hook endpoint)
 
@@ -515,7 +515,7 @@ To write a new test:
 
 - **MCP server is a separate process** spawned by Claude Desktop as a child process. It communicates via stdio (JSON-RPC 2.0) and checks commands by POSTing to the proxy's hook endpoint over HTTP. If the proxy is down, it falls back to checking trap files on disk, then executes the command (fail-open).
 
-- **Claude Desktop launch wrapper** requires the Desktop app to respect `ANTHROPIC_BASE_URL` env var. If the Electron app doesn't read this env var, API traffic won't be proxied and trap injection won't work (the MCP server will still block traps via hook/trap-file fallback).
+- **Claude Desktop launch wrapper** uses `--proxy-server=http://localhost:PORT` (the Chromium command-line flag) to route Electron app traffic through the proxy. `HTTPS_PROXY` env var does NOT work - Chromium ignores it and uses its own proxy stack. The proxy performs TLS MITM on `api.anthropic.com` using the CA from `~/.agentsaegis/ca.pem`. The CA must be trusted first via `sudo agentsaegis trust-cert`, same as for Copilot.
 
 - **`agentsaegis setup-desktop` writes the absolute binary path** to Claude Desktop's config. After a Homebrew upgrade that changes the binary path, re-run `setup-desktop`.
 

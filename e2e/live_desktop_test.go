@@ -31,14 +31,14 @@ func launchDesktop(t *testing.T, proxyPort int, caPath string) *desktopInstance 
 		t.Skipf("Claude Desktop not found at %s", appPath)
 	}
 
-	cmd := exec.Command(appPath)
+	cmd := exec.Command(appPath,
+		fmt.Sprintf("--proxy-server=http://localhost:%d", proxyPort),
+	)
 	stderrBuf := &syncBuffer{}
 	cmd.Stderr = stderrBuf
 
 	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("HTTPS_PROXY=http://localhost:%d", proxyPort),
 		fmt.Sprintf("NODE_EXTRA_CA_CERTS=%s", caPath),
-		"NODE_TLS_REJECT_UNAUTHORIZED=0",
 	)
 
 	if err := cmd.Start(); err != nil {
@@ -170,7 +170,7 @@ func runDesktopInjectionScenarios(t *testing.T) {
 			t.Fatal("trap registered but no SSE interception log (suspicious)")
 		}
 
-		t.Log("Desktop Injection: trap injected via HTTPS_PROXY MITM")
+		t.Log("Desktop Injection: trap injected via --proxy-server MITM")
 		liveResults.record("Desktop/Haiku", "Injection", "PASS")
 	})
 

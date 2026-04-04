@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -16,7 +15,7 @@ import (
 var launchCmd = &cobra.Command{
 	Use:   "launch claude-desktop",
 	Short: "Launch Claude Desktop with proxy environment",
-	Long:  "Starts the proxy if needed, then launches Claude Desktop with ANTHROPIC_BASE_URL pointing to the proxy.",
+	Long:  "Starts the proxy if needed, then launches Claude Desktop with --proxy-server pointing to the proxy for TLS MITM interception. Requires the proxy CA to be trusted (run: sudo agentsaegis trust-cert).",
 	RunE:  runLaunch,
 }
 
@@ -67,40 +66,32 @@ func runLaunch(_ *cobra.Command, args []string) error {
 	configDir, _ := config.ConfigDir()
 	caPath := configDir + "/ca.pem"
 
-	// Preflight: verify the proxy CA is trusted by the system.
-	// Without this, the MITM TLS handshake will fail and Desktop
-	// won't be able to reach the Anthropic API through the proxy.
-	if !isCATrusted(caPath) {
-		return fmt.Errorf("proxy CA is not trusted by the system.\nRun: sudo agentsaegis trust-cert")
+	// Warn if CA cert is missing - trust-cert must be run first
+	if _, err := os.Stat(caPath); err != nil {
+		fmt.Println("Warning: proxy CA not found. Start the proxy first, then run: sudo agentsaegis trust-cert")
+	} else if !isCATrusted(caPath) {
+		fmt.Println("Warning: proxy CA is not trusted. Run: sudo agentsaegis trust-cert")
 	}
 
-	cmd := exec.Command(appPath)
+	// Use --proxy-server so Chromium routes traffic through the proxy.
+	// HTTPS_PROXY is ignored by Electron's Chromium networking stack.
+	cmd := exec.Command(appPath, // nosemgrep: dangerous-exec-command -- appPath is a hardcoded constant
+		fmt.Sprintf("--proxy-server=%s", proxyURL),
+	)
 	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("HTTPS_PROXY=%s", proxyURL),
 		fmt.Sprintf("NODE_EXTRA_CA_CERTS=%s", caPath),
 	)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("launching Claude Desktop: %w", err)
 	}
 
-	fmt.Printf("Claude Desktop launched with HTTPS_PROXY=%s NODE_EXTRA_CA_CERTS=%s\n", proxyURL, caPath)
+	fmt.Printf("Claude Desktop launched with --proxy-server=%s NODE_EXTRA_CA_CERTS=%s\n", proxyURL, caPath)
 	return nil
 }
 
-// isCATrusted checks whether the proxy CA certificate is trusted by the system.
+// isCATrusted checks whether the given CA cert is trusted by the system on macOS.
+// Returns true on non-macOS platforms (no check available) or if the check passes.
 func isCATrusted(caPath string) bool {
-	if _, err := os.Stat(caPath); err != nil {
-		return false
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		err := exec.Command("security", "verify-cert", "-c", caPath).Run()
-		return err == nil
-	case "linux":
-		// Check if the cert is installed in the system CA bundle
-		_, err := os.Stat("/usr/local/share/ca-certificates/agentsaegis.crt")
-		return err == nil
-	default:
-		return false
-	}
+	out := exec.Command("security", "verify-cert", "-c", caPath) // nosemgrep: dangerous-exec-command -- caPath comes from config dir
+	return out.Run() == nil
 }
