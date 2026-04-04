@@ -204,7 +204,7 @@ func runCopilotInjectionScenarios(t *testing.T, pi *proxyInstance, modelName, mo
 		}
 
 		// Hook goes directly to the proxy, not through CONNECT tunnel
-		hookResp := sendHookRequest(t, pi.proxyURL, sid, trapCmd, toolUseID)
+		hookResp := liveSendHookRequest(t, pi.proxyURL, sid, trapCmd, toolUseID)
 
 		// Assert deny
 		output, ok := hookResp["hookSpecificOutput"].(map[string]interface{})
@@ -273,7 +273,7 @@ func runCopilotInjectionScenarios(t *testing.T, pi *proxyInstance, modelName, mo
 		// Using the trap's tool_use_id with a different command would trigger
 		// the "caught" path (user edited trap command). We want to test a
 		// completely unrelated command, so we use a fake tool_use_id.
-		hookResp := sendHookRequest(t, pi.proxyURL, sid, "echo this-is-not-a-trap", "unrelated-"+toolUseID)
+		hookResp := liveSendHookRequest(t, pi.proxyURL, sid, "echo this-is-not-a-trap", "unrelated-"+toolUseID)
 
 		// Assert allow
 		if _, hasDeny := hookResp["hookSpecificOutput"]; hasDeny {

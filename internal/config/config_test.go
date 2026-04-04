@@ -57,6 +57,14 @@ func TestLoad_DefaultsOnly(t *testing.T) {
 func TestLoad_FromConfigFile(t *testing.T) {
 	viper.Reset()
 
+	// Clear AEGIS_ env vars so they don't override config file values via AutomaticEnv
+	for _, key := range []string{
+		"AEGIS_DASHBOARD_URL", "AEGIS_API_TOKEN", "AEGIS_PROXY_PORT",
+		"AEGIS_ANTHROPIC_BASE_URL", "AEGIS_DEVELOPER_ID", "AEGIS_ORG_ID", "AEGIS_LOG_LEVEL",
+	} {
+		t.Setenv(key, "")
+	}
+
 	// Use a temp directory as a fake HOME
 	tmpHome := t.TempDir()
 	configDir := filepath.Join(tmpHome, ".agentsaegis")

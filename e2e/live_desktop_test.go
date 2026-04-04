@@ -21,8 +21,8 @@ type desktopInstance struct {
 	stderr *syncBuffer
 }
 
-// launchDesktop starts Claude Desktop with HTTPS_PROXY pointing at the proxy
-// and NODE_TLS_REJECT_UNAUTHORIZED=0 for MITM cert acceptance.
+// launchDesktop starts Claude Desktop with --proxy-server pointing at the proxy
+// and NODE_EXTRA_CA_CERTS for Node.js main-process networking.
 func launchDesktop(t *testing.T, proxyPort int, caPath string) *desktopInstance {
 	t.Helper()
 
@@ -98,7 +98,7 @@ func killAllDesktop(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Desktop injection scenarios (super-debug mode)
 //
-// REAL end-to-end: launches actual Claude Desktop app with HTTPS_PROXY,
+// REAL end-to-end: launches actual Claude Desktop app with --proxy-server,
 // sends messages via AppleScript, verifies trap injection via proxy logs.
 // Uses the user's subscription auth - no API key needed.
 // ---------------------------------------------------------------------------

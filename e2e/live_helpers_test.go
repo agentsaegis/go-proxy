@@ -968,9 +968,9 @@ else:
 	}
 }
 
-// sendHookRequest sends a PreToolUse hook request to the proxy and returns
+// liveSendHookRequest sends a PreToolUse hook request to the proxy and returns
 // the parsed JSON response.
-func sendHookRequest(t *testing.T, proxyURL, sessionID, command, toolUseID string) map[string]interface{} {
+func liveSendHookRequest(t *testing.T, proxyURL, sessionID, command, toolUseID string) map[string]interface{} {
 	t.Helper()
 
 	hookBody, _ := json.Marshal(map[string]interface{}{
@@ -984,13 +984,13 @@ func sendHookRequest(t *testing.T, proxyURL, sessionID, command, toolUseID strin
 	resp, err := http.Post(proxyURL+"/hooks/pre-tool-use", "application/json",
 		bytes.NewReader(hookBody))
 	if err != nil {
-		t.Fatalf("sendHookRequest: request failed: %v", err)
+		t.Fatalf("liveSendHookRequest: request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("sendHookRequest: decode response: %v", err)
+		t.Fatalf("liveSendHookRequest: decode response: %v", err)
 	}
 	return result
 }
