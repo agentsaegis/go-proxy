@@ -180,7 +180,7 @@ func runInit(_ *cobra.Command, _ []string) error {
 		for range 10 {
 			resp, err := http.Get(healthURL)
 			if err == nil {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
 					healthy = true
 					break
