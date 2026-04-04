@@ -66,11 +66,15 @@ func runLaunch(_ *cobra.Command, args []string) error {
 	configDir, _ := config.ConfigDir()
 	caPath := configDir + "/ca.pem"
 
-	// Warn if CA cert is missing - trust-cert must be run first
+	// With --proxy-server, Chromium routes ALL HTTPS through the proxy. An
+	// untrusted CA causes Chromium to reject every TLS connection - Desktop
+	// cannot reach api.anthropic.com at all. Fail fast rather than launch a
+	// broken instance.
 	if _, err := os.Stat(caPath); err != nil {
-		fmt.Println("Warning: proxy CA not found. Start the proxy first, then run: sudo agentsaegis trust-cert")
-	} else if !isCATrusted(caPath) {
-		fmt.Println("Warning: proxy CA is not trusted. Run: sudo agentsaegis trust-cert")
+		return fmt.Errorf("proxy CA not found at %s - start the proxy first, then run: sudo agentsaegis trust-cert", caPath)
+	}
+	if !isCATrusted(caPath) {
+		return fmt.Errorf("proxy CA is not trusted by the system - run: sudo agentsaegis trust-cert")
 	}
 
 	// Use --proxy-server so Chromium routes traffic through the proxy.
