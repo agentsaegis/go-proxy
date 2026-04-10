@@ -14,7 +14,3 @@ linters:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
-
-issues:
-  exclude-dirs:
-    - e2e

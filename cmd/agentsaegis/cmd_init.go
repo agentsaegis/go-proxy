@@ -140,12 +140,12 @@ func runInit(_ *cobra.Command, _ []string) error {
 		fmt.Printf("Shell wrapper: skipped (%v)\n", shellErr)
 	}
 
-	// Auto-setup Claude Desktop MCP server (if installed)
-	if _, statErr := os.Stat("/Applications/Claude.app"); statErr == nil {
-		if desktopErr := runSetupDesktop(nil, nil); desktopErr != nil {
-			fmt.Printf("Claude Desktop MCP: skipped (%v)\n", desktopErr)
-		}
-	}
+	// Claude Desktop MCP: disabled (TLS MITM via --proxy-server not working reliably)
+	// if _, statErr := os.Stat("/Applications/Claude.app"); statErr == nil {
+	// 	if desktopErr := runSetupDesktop(nil, nil); desktopErr != nil {
+	// 		fmt.Printf("Claude Desktop MCP: skipped (%v)\n", desktopErr)
+	// 	}
+	// }
 
 	// Auto-setup Copilot hooks + MCP (if VS Code installed)
 	home, _ := os.UserHomeDir()
