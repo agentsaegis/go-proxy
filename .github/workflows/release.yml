@@ -20,13 +20,15 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           echo "Checking CI status for $COMMIT_SHA on $REPO"
-          CONCLUSION=$(gh api "repos/$REPO/commits/$COMMIT_SHA/check-runs" \
-            --jq '.check_runs[] | select(.name == "ci") | .conclusion' 2>/dev/null || true)
-          if [ "$CONCLUSION" != "success" ]; then
-            echo "::error::CI has not passed on $COMMIT_SHA (got: ${CONCLUSION:-not found}). Push to main and wait for CI before tagging."
+          LINT=$(gh api "repos/$REPO/commits/$COMMIT_SHA/check-runs" \
+            --jq '.check_runs[] | select(.name == "Lint") | .conclusion' 2>/dev/null | head -1 || true)
+          TESTS=$(gh api "repos/$REPO/commits/$COMMIT_SHA/check-runs" \
+            --jq '.check_runs[] | select(.name == "Tests") | .conclusion' 2>/dev/null | head -1 || true)
+          if [ "$LINT" != "success" ] || [ "$TESTS" != "success" ]; then
+            echo "::error::CI has not passed on $COMMIT_SHA (Lint: ${LINT:-not found}, Tests: ${TESTS:-not found}). Push to main and wait for CI before tagging."
             exit 1
           fi
-          echo "CI passed on $COMMIT_SHA"
+          echo "CI passed on $COMMIT_SHA (Lint: $LINT, Tests: $TESTS)"
 
   goreleaser:
     needs: [verify-ci]
