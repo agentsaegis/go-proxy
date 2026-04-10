@@ -68,7 +68,7 @@ cmd/
     main.go              # Entry point, root cobra command, version var
     cmd_start.go         # `start` command - starts proxy (foreground or --daemon)
     cmd_stop.go          # `stop` command - sends SIGTERM to daemon PID
-    cmd_init.go          # `init` / `setup` commands - one-command setup (token + shell + hooks + integrations + daemon). Accepts --token flag for scripted install
+    cmd_init.go          # `init` / `setup` commands - one-command setup (token + shell + hooks + integrations). Accepts --token flag for scripted install
     cmd_status.go        # `status` command - shows proxy running state, port, org connection
     cmd_report.go        # `report` command - fetches personal trap stats from dashboard
     cmd_setup_shell.go   # `setup-shell` / `remove-shell` - manages shell wrapper in .zshrc/.bashrc/.config/fish + configures PreToolUse hook in ~/.claude/settings.json
@@ -543,7 +543,7 @@ To write a new test:
 
 - **MCP server is a separate process** spawned by Claude Desktop as a child process. It communicates via stdio (JSON-RPC 2.0) and checks commands by POSTing to the proxy's hook endpoint over HTTP. If the proxy is down, it falls back to checking trap files on disk, then executes the command (fail-open).
 
-- **Claude Desktop support is DISABLED.** The `launch`, `setup-desktop`, and `remove-desktop` commands are commented out in their `init()` functions. TLS MITM via Chromium's `--proxy-server` flag does not work reliably - Chromium rejects the proxy CA despite system trust. The code remains in the repo for future work. See `cmd_launch.go` and `cmd_setup_desktop.go`.
+- **Claude Desktop support is DISABLED.** The `launch`, `setup-desktop`, and `remove-desktop` commands are behind a `//go:build desktop` tag and excluded from normal compilation. TLS MITM via Chromium's `--proxy-server` flag does not work reliably - Chromium rejects the proxy CA despite system trust. The code remains in the repo for future work. See `cmd_launch.go` and `cmd_setup_desktop.go`.
 
 - **Docker QA uses `--super-debug` mode** for guaranteed trap injection on every command. Container entrypoint starts proxy as `qa` user (non-root) via `gosu`, then drops privileges for test scripts.
 
