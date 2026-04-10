@@ -146,21 +146,29 @@ func untrustCA() error {
 				}
 			}
 		}
-		// Fallback: remove by certificate name from system keychain (works even if
-		// ~/.agentsaegis/ was already deleted).
+		// Remove all copies by certificate name from system keychain (works even if
+		// ~/.agentsaegis/ was already deleted). Multiple copies can exist from
+		// repeated trust-cert runs; delete-certificate only removes one at a time.
 		if !removed {
-			// Check if the cert exists in the keychain first
+			// Check if any cert exists in the keychain first
 			check := exec.Command("security", "find-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
 			if checkErr := check.Run(); checkErr != nil {
 				fmt.Println("skipped (no CA in keychain)")
 				return nil
 			}
-			cmd := exec.Command("sudo", "security", "delete-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Stdin = os.Stdin
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("failed to remove CA from keychain (run with sudo): %w", err)
+			for {
+				cmd := exec.Command("sudo", "security", "delete-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Stdin = os.Stdin
+				if err := cmd.Run(); err != nil {
+					return fmt.Errorf("failed to remove CA from keychain (run with sudo): %w", err)
+				}
+				// Check if more copies remain
+				recheck := exec.Command("security", "find-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
+				if recheck.Run() != nil {
+					break // no more copies
+				}
 			}
 		}
 

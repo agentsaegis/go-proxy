@@ -68,6 +68,14 @@ func runTrustCert(_ *cobra.Command, _ []string) error {
 
 	switch runtime.GOOS {
 	case "darwin":
+		// Remove any existing AgentsAegis CA entries to prevent duplicates
+		for {
+			rm := exec.Command("sudo", "security", "delete-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
+			rm.Stdin = os.Stdin
+			if rm.Run() != nil {
+				break
+			}
+		}
 		fmt.Printf("Adding CA to system keychain (requires sudo):\n")
 		fmt.Printf("  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain %s\n\n", caPath)
 		cmd := exec.Command("sudo", "security", "add-trusted-cert",
