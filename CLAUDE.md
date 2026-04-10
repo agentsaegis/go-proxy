@@ -48,7 +48,7 @@ Copilot CLI  --[HTTPS_PROXY]--> AgentsAegis Proxy (CONNECT tunnel) --> api.githu
 
 **Trap resolution flow (two-phase):**
 1. Hook path: Claude Code/Copilot's `PreToolUse` hook POSTs to `POST /hooks/pre-tool-use` - `HookHandler` matches command against active trap, sets `HookBlocked=true` on the trap, returns deny. Does NOT resolve the trap yet (deferred resolution).
-2. Request-body path: Next API request's `tool_result` block is checked for the trap's `tool_use_id`. If `HookBlocked` is true, resolves as "missed". Otherwise checks tool_result content for rejection indicators (caught vs missed).
+2. Request-body path: Next API request's `tool_result` block is checked for the trap's `tool_use_id`. Content is always checked for rejection indicators (caught vs missed), regardless of `HookBlocked` state - because the user may have skipped/denied the command in the UI even after the hook fired.
 3. `CallbackHandler.ResolveTrap()` reports result to dashboard API, displays training message if missed, cleans up.
 
 The two-phase approach is critical because VS Code Copilot fires hooks BEFORE user approval (unlike Claude Code which fires AFTER). Deferring resolution to the request-body path ensures the trap stays active until the tool_result arrives.
@@ -295,7 +295,7 @@ All env vars are prefixed with `AEGIS_` and override config file values (via vip
 
 | Variable | Description | Required | Default |
 |---|---|---|---|
-| `AEGIS_DASHBOARD_URL` | Dashboard API base URL | No | `https://api.agentsaegis.com` |
+| `AEGIS_DASHBOARD_URL` | Dashboard API base URL | No | `https://agentsaegis.com` |
 | `AEGIS_API_TOKEN` | Dashboard API bearer token | No (offline mode without it) | none |
 | `AEGIS_PROXY_PORT` | Port the proxy listens on | No | `7331` |
 | `AEGIS_ANTHROPIC_BASE_URL` | Upstream Anthropic API URL | No | `https://api.anthropic.com` |
@@ -501,7 +501,7 @@ To write a new test:
 
 - **Trap resolution is idempotent.** `ActiveTrap.Resolved` is an `atomic.Bool` - the first call to `ResolveTrap()` wins, subsequent calls are no-ops. Both the hook path and request-body path can detect resolution, so this prevents double-reporting.
 
-- **Hook deferred resolution (HookBlocked pattern).** When the PreToolUse hook matches a trap command, it sets `HookBlocked=true` on the trap and returns deny, but does NOT call `ResolveTrap()`. Resolution happens later when the next API request arrives with the tool_result (request-body path). This is critical because VS Code Copilot fires hooks BEFORE user approval, while Claude Code fires them AFTER. If the hook resolved immediately, Copilot traps would resolve in ~40ms before the user even saw the command. The `HookBlocked` flag tells the request-body path to resolve as "missed" regardless of tool_result content (because the hook matched = the command was dangerous).
+- **Hook deferred resolution (HookBlocked pattern).** When the PreToolUse hook matches a trap command, it sets `HookBlocked=true` on the trap and returns deny, but does NOT call `ResolveTrap()`. Resolution happens later when the next API request arrives with the tool_result (request-body path). This is critical because VS Code Copilot fires hooks BEFORE user approval, while Claude Code fires them AFTER. If the hook resolved immediately, Copilot traps would resolve in ~40ms before the user even saw the command. The request-body path always checks tool_result content for rejection indicators regardless of `HookBlocked` state - if the user skipped/denied the command in the UI, it should be "caught" even though the hook also blocked it.
 
 - **Hook cooldown.** After the hook blocks a trap command, `HookHandler` suppresses the next 10 commands (`hookCooldownCommands`) to avoid re-blocking related commands in the same sequence.
 
@@ -557,7 +557,7 @@ To write a new test:
 
 ## External Services
 
-### AgentsAegis Dashboard API (`api.agentsaegis.com`)
+### AgentsAegis Dashboard API (`agentsaegis.com`)
 - **Purpose:** Org config (trap frequency, categories, difficulty), trap event reporting, personal stats
 - **If unavailable:** Proxy runs in offline mode with default config (`TrapFrequency: 50`, `MaxTrapsPerDay: 2`, all categories). Events are not reported. Warning logged at startup.
 - **API key:** Configured via `api_token` in config or `AEGIS_API_TOKEN` env var
@@ -574,4 +574,4 @@ To write a new test:
 ## Related Repos
 
 - **agentsaegis/homebrew-tap** - Homebrew formula for `agentsaegis` (auto-updated by GoReleaser)
-- **AgentsAegis monorepo** (private, not public) - Go API + React web app for team management, assessments, analytics, and training. This is the backend that serves `api.agentsaegis.com` and the web dashboard at `agentsaegis.com`.
+- **AgentsAegis monorepo** (private, not public) - Go API + React web app for team management, assessments, analytics, and training. This is the backend that serves the API and web dashboard at `agentsaegis.com`.

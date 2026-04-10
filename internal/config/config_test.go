@@ -11,8 +11,8 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.DashboardURL != "https://api.agentsaegis.com" {
-		t.Errorf("DashboardURL = %q, want %q", cfg.DashboardURL, "https://api.agentsaegis.com")
+	if cfg.DashboardURL != "https://agentsaegis.com" {
+		t.Errorf("DashboardURL = %q, want %q", cfg.DashboardURL, "https://agentsaegis.com")
 	}
 	if cfg.ProxyPort != 7331 {
 		t.Errorf("ProxyPort = %d, want %d", cfg.ProxyPort, 7331)

@@ -108,7 +108,7 @@ func TestMain(m *testing.M) {
 	liveAnthropicAPIKey = os.Getenv("ANTHROPIC_API_KEY")
 	liveDashboardURL = os.Getenv("AEGIS_DASHBOARD_URL")
 	if liveDashboardURL == "" {
-		liveDashboardURL = "https://api.agentsaegis.com"
+		liveDashboardURL = "https://agentsaegis.com"
 	}
 
 	// Build the proxy binary

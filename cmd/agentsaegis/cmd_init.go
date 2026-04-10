@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +39,7 @@ func init() {
 	for _, cmd := range []*cobra.Command{initCmd, setupCmd} {
 		cmd.Flags().BoolVar(&offlineFlag, "offline", false, "Skip dashboard connection (offline mode)")
 		cmd.Flags().StringVar(&tokenFlag, "token", "", "API token (skips interactive prompt)")
-		cmd.Flags().StringVar(&dashURLFlag, "dashboard-url", "", "Dashboard URL (default: https://api.agentsaegis.com)")
+		cmd.Flags().StringVar(&dashURLFlag, "dashboard-url", "", "Dashboard URL (default: https://agentsaegis.com)")
 		rootCmd.AddCommand(cmd)
 	}
 }
@@ -52,7 +51,7 @@ func runInit(_ *cobra.Command, _ []string) error {
 	var dashboardURL, apiToken string
 
 	if offlineFlag {
-		dashboardURL = "https://api.agentsaegis.com"
+		dashboardURL = "https://agentsaegis.com"
 		fmt.Println("Offline mode - skipping dashboard connection.")
 	} else {
 		reader := bufio.NewReader(os.Stdin)
@@ -63,7 +62,7 @@ func runInit(_ *cobra.Command, _ []string) error {
 			dashboardURL = os.Getenv("AEGIS_DASHBOARD_URL")
 		}
 		if dashboardURL == "" {
-			fmt.Print("Dashboard URL [https://api.agentsaegis.com]: ")
+			fmt.Print("Dashboard URL [https://agentsaegis.com]: ")
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				return fmt.Errorf("reading dashboard URL: %w", err)
@@ -71,7 +70,7 @@ func runInit(_ *cobra.Command, _ []string) error {
 			dashboardURL = strings.TrimSpace(line)
 		}
 		if dashboardURL == "" {
-			dashboardURL = "https://api.agentsaegis.com"
+			dashboardURL = "https://agentsaegis.com"
 		}
 
 		// Resolve API token: flag > env > interactive
@@ -165,41 +164,13 @@ func runInit(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Start proxy daemon
-	daemonFlag = true
-	if startErr := runStart(nil, nil); startErr != nil {
-		fmt.Printf("Proxy daemon: skipped (%v)\n", startErr)
-	} else {
-		// Verify health
-		healthy := false
-		port := 7331
-		if cfg, loadErr := config.Load(); loadErr == nil {
-			port = cfg.ProxyPort
-		}
-		healthURL := fmt.Sprintf("http://localhost:%d/__aegis/health", port)
-		for range 10 {
-			resp, err := http.Get(healthURL)
-			if err == nil {
-				_ = resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					healthy = true
-					break
-				}
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		if healthy {
-			fmt.Printf("Proxy running on port %d\n", port)
-		} else {
-			fmt.Println("Warning: proxy started but health check failed")
-		}
-	}
-	daemonFlag = false
-
 	fmt.Println()
-	fmt.Println("Setup complete. Restart your terminal (or: source ~/.zshrc)")
+	fmt.Println("Setup complete. Next steps:")
+	fmt.Println("  1. Start the proxy:  agentsaegis start --daemon")
+	fmt.Println("  2. Restart your terminal (or: source ~/.zshrc)")
+	fmt.Println()
 	fmt.Println("One-line install for your team:")
-	fmt.Println("  brew install agentsaegis/tap/agentsaegis && agentsaegis setup --token <TOKEN>")
+	fmt.Println("  brew install agentsaegis/tap/agentsaegis && agentsaegis init --token <TOKEN>")
 	fmt.Println()
 
 	return nil

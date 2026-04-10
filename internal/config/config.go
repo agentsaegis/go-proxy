@@ -23,7 +23,7 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
-		DashboardURL:     "https://api.agentsaegis.com",
+		DashboardURL:     "https://agentsaegis.com",
 		ProxyPort:        7331,
 		AnthropicBaseURL: "https://api.anthropic.com",
 		LogLevel:         "info",
@@ -46,7 +46,7 @@ func Load() (*Config, error) {
 	viper.AutomaticEnv()
 
 	// Set defaults
-	viper.SetDefault("dashboard_url", "https://api.agentsaegis.com")
+	viper.SetDefault("dashboard_url", "https://agentsaegis.com")
 	viper.SetDefault("proxy_port", 7331)
 	viper.SetDefault("anthropic_base_url", "https://api.anthropic.com")
 	viper.SetDefault("log_level", "info")
