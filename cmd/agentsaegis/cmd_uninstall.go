@@ -140,14 +140,33 @@ func untrustCA() error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		// remove-trusted-cert removes trust for the exact cert file we point to.
-		// This only affects our own CA - no risk of touching other certificates.
-		cmd := exec.Command("sudo", "security", "remove-trusted-cert", "-d", caPath)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Stdin = os.Stdin
-		if err := cmd.Run(); err != nil {
-			fmt.Printf("  (could not remove trust: %v - may already be untrusted)\n", err)
+		removed := false
+		// Try removing trust via cert file first (works if ~/.agentsaegis/ca.pem exists).
+		if _, statErr := os.Stat(caPath); statErr == nil {
+			cmd := exec.Command("sudo", "security", "remove-trusted-cert", "-d", caPath)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Stdin = os.Stdin
+			if err := cmd.Run(); err == nil {
+				removed = true
+			}
+		}
+		// Fallback: remove by certificate name from system keychain (works even if
+		// ~/.agentsaegis/ was already deleted).
+		if !removed {
+			cmd := exec.Command("sudo", "security", "delete-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Stdin = os.Stdin
+			if err := cmd.Run(); err != nil {
+				// Check if it's just not there
+				check := exec.Command("security", "find-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
+				if checkErr := check.Run(); checkErr != nil {
+					fmt.Println("skipped (no CA in keychain)")
+					return nil
+				}
+				return fmt.Errorf("failed to remove CA from keychain (run with sudo): %w", err)
+			}
 		}
 
 	case "linux":
