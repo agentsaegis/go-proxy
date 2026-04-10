@@ -1,6 +1,6 @@
 bin/
 coverage.out
-agentsaegis
+/agentsaegis
 dist/
 internal/trap/traps/.DS_Store
 .env
