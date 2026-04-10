@@ -129,42 +129,37 @@ func stopProxy() error {
 
 // untrustCA removes the AgentsAegis CA from the system trust store.
 func untrustCA() error {
-	caPath, err := aegisCAPath()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(caPath); os.IsNotExist(err) {
-		fmt.Println("skipped (no CA found)")
-		return nil
-	}
+	caPath, _ := aegisCAPath()
 
 	switch runtime.GOOS {
 	case "darwin":
 		removed := false
 		// Try removing trust via cert file first (works if ~/.agentsaegis/ca.pem exists).
-		if _, statErr := os.Stat(caPath); statErr == nil {
-			cmd := exec.Command("sudo", "security", "remove-trusted-cert", "-d", caPath)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Stdin = os.Stdin
-			if err := cmd.Run(); err == nil {
-				removed = true
+		if caPath != "" {
+			if _, statErr := os.Stat(caPath); statErr == nil {
+				cmd := exec.Command("sudo", "security", "remove-trusted-cert", "-d", caPath)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Stdin = os.Stdin
+				if err := cmd.Run(); err == nil {
+					removed = true
+				}
 			}
 		}
 		// Fallback: remove by certificate name from system keychain (works even if
 		// ~/.agentsaegis/ was already deleted).
 		if !removed {
+			// Check if the cert exists in the keychain first
+			check := exec.Command("security", "find-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
+			if checkErr := check.Run(); checkErr != nil {
+				fmt.Println("skipped (no CA in keychain)")
+				return nil
+			}
 			cmd := exec.Command("sudo", "security", "delete-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			cmd.Stdin = os.Stdin
 			if err := cmd.Run(); err != nil {
-				// Check if it's just not there
-				check := exec.Command("security", "find-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
-				if checkErr := check.Run(); checkErr != nil {
-					fmt.Println("skipped (no CA in keychain)")
-					return nil
-				}
 				return fmt.Errorf("failed to remove CA from keychain (run with sudo): %w", err)
 			}
 		}
