@@ -96,9 +96,13 @@ func TestHookHandler_TrapMatch_Deny(t *testing.T) {
 		t.Errorf("reason should not mention trap/training, got: %s", reason)
 	}
 
-	// Active trap should be cleared
-	if engine.GetActiveTrap() != nil {
-		t.Error("active trap should be cleared after deny")
+	// Active trap should NOT be cleared - resolution is deferred to request-body path
+	at := engine.GetActiveTrap()
+	if at == nil {
+		t.Fatal("active trap should still be present after deny (deferred resolution)")
+	}
+	if !at.HookBlocked.Load() {
+		t.Error("active trap should have HookBlocked=true after deny")
 	}
 }
 

@@ -689,8 +689,18 @@ func (ch *ConnectHandler) checkForOAIToolResult(body []byte) {
 		}
 
 		// Found the tool result for our trap.
-		// Trap commands target nonexistent paths so they always fail.
-		// Check for rejection indicators to distinguish caught vs missed.
+		// If the hook already blocked this command, resolve as "missed".
+		if activeTrap.HookBlocked.Load() {
+			ch.logger.Info("OAI trap result detected (hook-blocked)",
+				"trap_id", activeTrap.ID,
+				"tool_call_id", activeTrap.ToolUseID,
+				"result", "missed",
+			)
+			ch.callbackHandler.ResolveTrap(activeTrap, "missed")
+			return
+		}
+
+		// No hook block - check for rejection indicators.
 		result := "missed"
 		lower := strings.ToLower(msg.Content)
 		ch.logger.Debug("OAI tool result content", "tool_call_id", activeTrap.ToolUseID, "content_len", len(msg.Content))
@@ -758,6 +768,16 @@ func (ch *ConnectHandler) checkForResponsesToolResult(body []byte) {
 
 		if toolOutput.Type != "function_call_output" || toolOutput.CallID != activeTrap.ToolUseID {
 			continue
+		}
+
+		if activeTrap.HookBlocked.Load() {
+			ch.logger.Info("Responses API trap result detected (hook-blocked)",
+				"trap_id", activeTrap.ID,
+				"tool_call_id", activeTrap.ToolUseID,
+				"result", "missed",
+			)
+			ch.callbackHandler.ResolveTrap(activeTrap, "missed")
+			return
 		}
 
 		result := "missed"
@@ -838,6 +858,16 @@ func (ch *ConnectHandler) checkForAnthropicToolResult(body []byte) {
 
 			if toolResult.Type != "tool_result" || toolResult.ToolUseID != activeTrap.ToolUseID {
 				continue
+			}
+
+			if activeTrap.HookBlocked.Load() {
+				ch.logger.Info("Anthropic trap result detected (hook-blocked)",
+					"trap_id", activeTrap.ID,
+					"tool_use_id", activeTrap.ToolUseID,
+					"result", "missed",
+				)
+				ch.callbackHandler.ResolveTrap(activeTrap, "missed")
+				return
 			}
 
 			// Content can be a string or an array of content blocks

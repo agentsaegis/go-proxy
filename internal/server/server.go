@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -98,6 +99,7 @@ func New(
 	mux.HandleFunc("POST /hooks/pre-tool-use", s.handleHook)
 	mux.HandleFunc("POST /hooks/inject-trap", s.handleInjectTrap)
 	mux.HandleFunc("GET /__aegis/health", s.handleHealth)
+	mux.HandleFunc("GET /__aegis/categories", s.handleCategories)
 
 	// Wrap mux to intercept CONNECT requests before the ServeMux,
 	// which does not route CONNECT to pattern handlers.
@@ -154,5 +156,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
 		s.logger.Error("failed to write health response", "error", err)
+	}
+}
+
+func (s *Server) handleCategories(w http.ResponseWriter, r *http.Request) {
+	resp := struct {
+		Categories []trap.CategoryMeta  `json:"categories"`
+		Profiles   []trap.ProfilePreset `json:"profiles"`
+	}{
+		Categories: trap.AllCategoryMeta(),
+		Profiles:   trap.ProfilePresets,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	data, _ := json.Marshal(resp)
+	if _, err := w.Write(data); err != nil {
+		s.logger.Error("failed to write categories response", "error", err)
 	}
 }

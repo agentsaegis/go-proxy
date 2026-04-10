@@ -2,7 +2,9 @@
 
 ## Project Overview
 
-AgentsAegis is an open-source security awareness proxy for AI coding tools (Claude Code CLI and Claude Desktop). It sits between AI tools and the Anthropic API on `localhost:7331`, intercepting API traffic. It occasionally replaces legitimate bash commands in AI responses with realistic but inherently harmless "trap" commands (targeting nonexistent paths, fake remotes, reserved addresses). If a developer approves a trap without noticing, execution is blocked and a training message is displayed. For Claude Code CLI, blocking uses `PreToolUse` hooks. For Claude Desktop, blocking uses an MCP server that checks commands against the proxy before executing them. Results are optionally reported to the AgentsAegis dashboard API for team-level tracking and analytics.
+AgentsAegis is an open-source security awareness proxy for AI coding tools (Claude Code CLI and GitHub Copilot in VS Code). It sits between AI tools and their APIs on `localhost:7331`, intercepting API traffic. It occasionally replaces legitimate bash commands in AI responses with realistic but inherently harmless "trap" commands (targeting nonexistent paths, fake remotes, reserved addresses). If a developer approves a trap without noticing, execution is blocked and a training message is displayed. For Claude Code CLI, blocking uses `PreToolUse` hooks. For Copilot in VS Code, blocking uses the same hook mechanism via CONNECT tunnel TLS MITM. Results are optionally reported to the AgentsAegis dashboard API for team-level tracking and analytics.
+
+**Note:** Claude Desktop support is disabled (TLS MITM via `--proxy-server` not working reliably with Chromium). The MCP server and setup-desktop commands exist but are commented out.
 
 ## Tech Stack
 
@@ -44,14 +46,17 @@ Copilot CLI  --[HTTPS_PROXY]--> AgentsAegis Proxy (CONNECT tunnel) --> api.githu
 6. If trap injected: `CallbackHandler.RegisterTrap()` stores active trap in engine + writes trap file to disk
 7. Response (possibly modified) streams back to Claude Code
 
-**Trap resolution flow:**
-1. Hook path: Claude Code's `PreToolUse` hook POSTs to `POST /hooks/pre-tool-use` - `HookHandler` matches command against active trap, blocks if matched
-2. Request-body path: Next API request's `tool_result` block is checked for the trap's `tool_use_id` - detects approval/rejection
-3. `CallbackHandler.ResolveTrap()` reports result to dashboard API, displays training message if missed, cleans up
+**Trap resolution flow (two-phase):**
+1. Hook path: Claude Code/Copilot's `PreToolUse` hook POSTs to `POST /hooks/pre-tool-use` - `HookHandler` matches command against active trap, sets `HookBlocked=true` on the trap, returns deny. Does NOT resolve the trap yet (deferred resolution).
+2. Request-body path: Next API request's `tool_result` block is checked for the trap's `tool_use_id`. If `HookBlocked` is true, resolves as "missed". Otherwise checks tool_result content for rejection indicators (caught vs missed).
+3. `CallbackHandler.ResolveTrap()` reports result to dashboard API, displays training message if missed, cleans up.
 
-**Four HTTP endpoints:**
+The two-phase approach is critical because VS Code Copilot fires hooks BEFORE user approval (unlike Claude Code which fires AFTER). Deferring resolution to the request-body path ensures the trap stays active until the tool_result arrives.
+
+**Five HTTP endpoints:**
 - `GET /__aegis/health` - health check (used by shell wrapper to detect if proxy is running)
-- `POST /hooks/pre-tool-use` - Claude Code PreToolUse hook endpoint
+- `GET /__aegis/categories` - returns category metadata + profile presets as JSON (for dashboard)
+- `POST /hooks/pre-tool-use` - Claude Code/Copilot PreToolUse hook endpoint
 - `POST /hooks/inject-trap` - Copilot hook injection endpoint
 - `/ (catch-all)` - reverse proxy to Anthropic API; also handles CONNECT for TLS MITM tunnels
 
@@ -67,9 +72,10 @@ cmd/
     cmd_status.go        # `status` command - shows proxy running state, port, org connection
     cmd_report.go        # `report` command - fetches personal trap stats from dashboard
     cmd_setup_shell.go   # `setup-shell` / `remove-shell` - manages shell wrapper in .zshrc/.bashrc/.config/fish + configures PreToolUse hook in ~/.claude/settings.json
-    cmd_setup_desktop.go # `setup-desktop` / `remove-desktop` - patches Claude Desktop MCP config
+    cmd_setup_desktop.go # `setup-desktop` / `remove-desktop` - patches Claude Desktop MCP config (DISABLED)
     cmd_mcp.go           # `mcp` command - runs as MCP server (stdio transport) for Claude Desktop
-    cmd_launch.go        # `launch claude-desktop` - launches Desktop app with proxy env var
+    cmd_launch.go        # `launch claude-desktop` - launches Desktop app with proxy env var (DISABLED)
+    cmd_uninstall.go     # `uninstall` - full cleanup: stop proxy, remove shell/hooks/vscode/CA/config
     cmd_hook.go          # `hook` command - bridge for Claude Code and Copilot PreToolUse hooks (stdin/stdout, supports both snake_case and camelCase formats)
     cmd_setup_copilot.go # `setup-copilot` / `remove-copilot` - configures Copilot hooks + MCP in VS Code
     cmd_setup_vscode.go  # `setup-vscode` / `remove-vscode` - configures VS Code http.proxy for Copilot interception
@@ -106,6 +112,7 @@ internal/
     engine.go            # Engine - trap injection decision logic (frequency, jitter, cooldown, active trap)
     selector.go          # Selector - picks trap template based on command keywords, avoids repeats
     callback.go          # CallbackHandler - trap registration, resolution, dashboard reporting
+    categories.go        # CategoryMeta registry, ProfilePresets, AllCategoryMeta(), ProfileForCategories()
     templates.go         # Template struct, LoadTemplates() from embedded YAML, ValidateTrapSafety()
     trapfile.go          # Trap file I/O (JSON files in ~/.agentsaegis/traps/ for fallback script)
     matcher.go           # MatchCommand() - structural command matching (normalization, hash, fuzzy)
@@ -148,6 +155,7 @@ e2e/
   live_test.go           # Live E2E tests (build tag: live) - TestMain, matrix runner, result tracker
   live_claude_test.go    # Live Claude CLI scenarios - runs `claude -p` through proxy with PreToolUse hook
   live_copilot_test.go   # Live Copilot scenarios - OpenAI SSE format through CONNECT tunnel
+  live_desktop_test.go   # Live Desktop scenarios (DISABLED - skips with message)
   live_helpers_test.go   # Live test helpers - proxy subprocess, token exchange, SSE parsers
 
 install.sh               # Curl-pipe installer script - detects OS/arch, downloads release, verifies checksum
@@ -181,16 +189,17 @@ docs/                    # Documentation (untracked, not in git yet)
    - `RegisterTrap` writes trap file via `WriteTrapFile()` (trapfile.go:35)
    - Modified SSE deltas emitted via `buildModifiedDeltas()` (stream.go:251)
 
-### 2. Trap detection via PreToolUse hook
+### 2. Trap detection via PreToolUse hook (two-phase)
 
-1. Claude Code calls `POST /hooks/pre-tool-use` - hits `HookHandler.HandlePreToolUse()` (hook.go:71)
+1. Claude Code/Copilot calls `POST /hooks/pre-tool-use` - hits `HookHandler.HandlePreToolUse()` (hook.go:77)
 2. Validates optional `X-Hook-Secret` header
 3. Parses `HookRequest` JSON: session_id, tool_name, tool_input.command
 4. Only processes `PreToolUse` + `Bash` tool
 5. Checks cooldown, then gets active trap from engine
 6. `MatchCommand()` (matcher.go:18) compares hook command to trap command
-7. If matched: `CallbackHandler.ResolveTrap()` (callback.go:83) reports "missed", activates cooldown, responds with deny
-8. If not matched: responds with allow (empty 200)
+7. If matched: sets `activeTrap.HookBlocked=true`, activates cooldown, responds with deny. Does NOT resolve - resolution deferred to request-body path (flow 3).
+8. If not matched but same tool_use_id: resolves as "caught" (user edited command)
+9. If not matched, different tool_use: responds with allow (empty 200)
 
 ### 3. Trap detection via request body (fallback)
 
@@ -257,6 +266,7 @@ No database. All state is ephemeral or file-based:
 - `OriginalCommand` (string) - the replaced command
 - `InjectedAt` (time.Time)
 - `Triggered` (atomic.Bool), `Resolved` (atomic.Bool) - prevent double-resolution
+- `HookBlocked` (atomic.Bool) - set when PreToolUse hook matched and blocked; defers resolution to request-body path
 
 **Template** (loaded from embedded YAML, `internal/trap/templates.go:22`):
 - `id`, `category`, `subcategory`, `severity`, `name`, `description`
@@ -322,10 +332,11 @@ go run ./cmd/agentsaegis mcp
 # Reads JSON-RPC from stdin, writes to stdout, logs to stderr
 ```
 
-### Setup Claude Desktop integration
+### Setup Claude Desktop integration (DISABLED)
 ```bash
-agentsaegis setup-desktop    # Add MCP server to Claude Desktop config
-agentsaegis remove-desktop   # Remove MCP server from Claude Desktop config
+# These commands are disabled - Chromium MITM not working reliably.
+# agentsaegis setup-desktop    # Add MCP server to Claude Desktop config
+# agentsaegis remove-desktop   # Remove MCP server from Claude Desktop config
 ```
 
 ### Setup Copilot integration (VS Code agent mode)
@@ -350,10 +361,10 @@ The CA is generated automatically on first proxy start at `~/.agentsaegis/ca.pem
 Copilot CLI uses `HTTPS_PROXY=http://localhost:PORT` (set by the shell wrapper) which
 requires the CA to be trusted for TLS MITM to work.
 
-### Launch Claude Desktop with proxy
+### Launch Claude Desktop with proxy (DISABLED)
 ```bash
-agentsaegis launch claude-desktop
-# Starts proxy if needed, launches Desktop with ANTHROPIC_BASE_URL set
+# Disabled - Chromium MITM not working reliably.
+# agentsaegis launch claude-desktop
 ```
 
 ### Reload proxy config without restart
@@ -366,6 +377,13 @@ agentsaegis reload
 ```bash
 agentsaegis install-service    # macOS: launchd plist, Linux: systemd user unit
 agentsaegis uninstall-service  # Remove the service
+```
+
+### Full uninstall (remove everything)
+```bash
+agentsaegis uninstall
+# Stops proxy, removes shell wrappers, Claude hooks, Copilot/VS Code config,
+# untrusts CA from system keychain (requires sudo), deletes ~/.agentsaegis/
 ```
 
 ### Run QA tests in Docker (isolated)
@@ -469,7 +487,13 @@ To write a new test:
 
 - **Fail-open by design.** This is the most important architectural decision in the proxy. If the proxy is down, Claude Code hooks fail open - commands execute without any trap checking. The shell wrapper (`claude()` function) auto-starts the proxy if it's not running, and restarts it after a non-zero exit. If the proxy is unreachable even after auto-start, Claude Code talks directly to Anthropic with no interception at all. The trap file mechanism (`~/.agentsaegis/traps/*.json`) exists as a fallback for detecting active traps even if the hook HTTP call fails. Any future developer must preserve this fail-open guarantee - the proxy must never prevent Claude Code from working.
 
-- **Trap commands must be inherently safe.** `ValidateTrapSafety()` rejects commands that could cause real harm. All `rm` targets must be under `/tmp/.aegis-trap*`, all network destinations must be `0.0.0.0` (connection refused), all packages must use `aegis-trap-nonexistent` prefix, all git operations must use `--dry-run` or `aegis-nonexistent-remote`. If you add a trap that fails safety validation, it's silently dropped at startup.
+- **Trap commands must be inherently safe.** `ValidateTrapSafety()` rejects commands that could cause real harm. All `rm` targets must be under `/tmp/.aegis-trap*`, all network destinations must be `0.0.0.0` (connection refused) or AgentsAegis-owned domains (see below), all packages must use `aegis-trap-nonexistent` prefix or the `agentsaegis` org namespace, all git operations must use `--dry-run` or `aegis-nonexistent-remote`. If you add a trap that fails safety validation, it's silently dropped at startup.
+
+- **AgentsAegis-owned external assets used in trap templates.** The following domains, GitHub repos, and package names are owned and controlled by AgentsAegis. They are allowlisted in `ValidateTrapSafety()` (`templates.go`) and used in trap commands to make exfiltration/supply-chain traps realistic. They must remain under AgentsAegis control - if ownership lapses, trap commands that escape hook blocking (fail-open) would hit attacker-controlled endpoints.
+  - **Domains:** `artifact-zone.com`, `networkwarmup.com` (used in `exfiltration/env-exfil-curl.yml`, `windows-exfiltration/ad-credentials-exfil.yml`, `windows-exfiltration/credential-harvest-securestring.yml`)
+  - **GitHub repos:** `agentsaegis/env-loader`, `agentsaegis/deploy-utils` (used in `supply-chain/github-install.yml`)
+  - **npm packages:** any under the `@agentsaegis/` scope or `agentsaegis-` prefix
+  - **pip packages:** any under the `agentsaegis/` GitHub org
 
 - **Accept-Encoding is stripped from upstream requests** (handler.go:128). Without this, Anthropic sends gzip-compressed SSE streams that the proxy can't parse for trap injection.
 
@@ -477,7 +501,9 @@ To write a new test:
 
 - **Trap resolution is idempotent.** `ActiveTrap.Resolved` is an `atomic.Bool` - the first call to `ResolveTrap()` wins, subsequent calls are no-ops. Both the hook path and request-body path can detect resolution, so this prevents double-reporting.
 
-- **Hook cooldown.** After a trap is resolved via the hook, `HookHandler` suppresses the next 10 commands (`hookCooldownCommands`) to avoid re-blocking related commands in the same sequence.
+- **Hook deferred resolution (HookBlocked pattern).** When the PreToolUse hook matches a trap command, it sets `HookBlocked=true` on the trap and returns deny, but does NOT call `ResolveTrap()`. Resolution happens later when the next API request arrives with the tool_result (request-body path). This is critical because VS Code Copilot fires hooks BEFORE user approval, while Claude Code fires them AFTER. If the hook resolved immediately, Copilot traps would resolve in ~40ms before the user even saw the command. The `HookBlocked` flag tells the request-body path to resolve as "missed" regardless of tool_result content (because the hook matched = the command was dangerous).
+
+- **Hook cooldown.** After the hook blocks a trap command, `HookHandler` suppresses the next 10 commands (`hookCooldownCommands`) to avoid re-blocking related commands in the same sequence.
 
 - **SSE panic recovery.** The SSE interceptor runs inside `processSSEStream()` with `defer recover()`. If the interceptor panics, remaining upstream data is passed through unmodified via `drainSSEPassthrough()`. Similarly, `safeInjectTrapInJSON()` wraps JSON injection with panic recovery. The proxy never crashes from a bad trap injection.
 
@@ -511,13 +537,13 @@ To write a new test:
 
 - **Trap templates are embedded at compile time** via `go:embed all:traps` in `templates.go`. Changes to YAML files require recompilation. There's no runtime template loading.
 
+- **Category metadata and profile presets** are defined in `internal/trap/categories.go`. The proxy exposes them via `GET /__aegis/categories`. The dashboard uses this to render friendly names and profile-based category selection instead of raw slug toggles. When adding a new trap category, also add its metadata to `CategoryRegistry` in categories.go.
+
 - **The `expired` result is mapped to `missed`** when reporting to the dashboard API (callback.go:123) because the DB constraint only allows missed/caught/edited.
 
 - **MCP server is a separate process** spawned by Claude Desktop as a child process. It communicates via stdio (JSON-RPC 2.0) and checks commands by POSTing to the proxy's hook endpoint over HTTP. If the proxy is down, it falls back to checking trap files on disk, then executes the command (fail-open).
 
-- **Claude Desktop launch wrapper** uses `--proxy-server=http://localhost:PORT` (the Chromium command-line flag) to route Electron app traffic through the proxy. `HTTPS_PROXY` env var does NOT work - Chromium ignores it and uses its own proxy stack. The proxy performs TLS MITM on `api.anthropic.com` using the CA from `~/.agentsaegis/ca.pem`. The CA must be trusted first via `sudo agentsaegis trust-cert`, same as for Copilot.
-
-- **`agentsaegis setup-desktop` writes the absolute binary path** to Claude Desktop's config. After a Homebrew upgrade that changes the binary path, re-run `setup-desktop`.
+- **Claude Desktop support is DISABLED.** The `launch`, `setup-desktop`, and `remove-desktop` commands are commented out in their `init()` functions. TLS MITM via Chromium's `--proxy-server` flag does not work reliably - Chromium rejects the proxy CA despite system trust. The code remains in the repo for future work. See `cmd_launch.go` and `cmd_setup_desktop.go`.
 
 - **Docker QA uses `--super-debug` mode** for guaranteed trap injection on every command. Container entrypoint starts proxy as `qa` user (non-root) via `gosu`, then drops privileges for test scripts.
 

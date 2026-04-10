@@ -132,7 +132,7 @@ func liveStartProxy(
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, binaryPath, args...)
+	cmd := exec.CommandContext(ctx, binaryPath, args...) // nosemgrep: dangerous-exec-command -- binaryPath built by TestMain
 
 	stderrBuf := &syncBuffer{}
 	cmd.Stderr = stderrBuf
@@ -865,7 +865,9 @@ func runClaudeCLICatchMode(t *testing.T, proxyPort int, prompt string, timeout t
 		t.Fatalf("runClaudeCLICatchMode: create .claude dir: %v", err)
 	}
 
-	// Write a Python hook script that detects traps and modifies the command
+	// Write a Python hook script that detects traps and blocks the command.
+	// Must output a block response FIRST (preventing execution), then send
+	// a modified command to the proxy to resolve as "caught".
 	hookScript := fmt.Sprintf(`#!/usr/bin/env python3
 import sys, json, urllib.request
 
@@ -874,8 +876,15 @@ command = data.get("tool_input", {}).get("command", "")
 tool_use_id = data.get("tool_use_id", "")
 session_id = data.get("session_id", "")
 
-# If command looks like a trap, send MODIFIED command to proxy (simulating user edit)
+# If command looks like a trap, block it and notify the proxy
 if "aegis_canary" in command or "aegis-trap" in command:
+    # Block the command (Claude Code format) to prevent execution
+    response = {"decision": "block", "reason": "User caught the trap and rejected the command"}
+    json.dump(response, sys.stdout)
+    sys.stdout.flush()
+
+    # Send modified command to proxy to resolve trap as "caught"
+    # (same tool_use_id + different command = user edited the trap)
     modified = "echo user-caught-this-trap"
     payload = json.dumps({
         "session_id": session_id,
@@ -893,10 +902,9 @@ if "aegis_canary" in command or "aegis-trap" in command:
         urllib.request.urlopen(req, timeout=5)
     except Exception:
         pass
-    # Allow the modified command to execute (don't block)
     sys.exit(0)
 else:
-    # Non-trap command - allow
+    # Non-trap command - allow (no output = allow)
     sys.exit(0)
 `, proxyPort)
 
@@ -945,9 +953,13 @@ else:
 			filtered = append(filtered, e)
 		}
 	}
+	// ANTHROPIC_BASE_URL routes API traffic through the test proxy.
+	// AEGIS_PROXY_PORT=1 (unreachable) prevents the user's global agentsaegis
+	// hook from interfering - only the project-level Python catch-hook fires.
+	// The Python hook has the correct port hardcoded in the script.
 	filtered = append(filtered,
 		fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", proxyPort),
-		fmt.Sprintf("AEGIS_PROXY_PORT=%d", proxyPort),
+		"AEGIS_PROXY_PORT=1",
 	)
 	cmd.Env = filtered
 

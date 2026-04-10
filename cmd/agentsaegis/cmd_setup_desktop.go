@@ -24,8 +24,9 @@ var removeDesktopCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(setupDesktopCmd)
-	rootCmd.AddCommand(removeDesktopCmd)
+	// TODO: Claude Desktop support disabled - MITM via --proxy-server not working reliably.
+	// rootCmd.AddCommand(setupDesktopCmd)
+	// rootCmd.AddCommand(removeDesktopCmd)
 }
 
 func claudeDesktopConfigPath() (string, error) {

@@ -4,3 +4,5 @@ agentsaegis
 dist/
 internal/trap/traps/.DS_Store
 .env
+.remember/
+REPO-SPLIT-PLAN.md

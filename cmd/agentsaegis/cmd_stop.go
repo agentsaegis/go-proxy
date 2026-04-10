@@ -70,9 +70,8 @@ func runStop(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Clean up PID file
-	if removeErr := daemon.RemovePID(configDir); removeErr != nil {
-		// Not fatal - the process is stopped
+	// Clean up PID file (may already be removed by the daemon's own shutdown).
+	if removeErr := daemon.RemovePID(configDir); removeErr != nil && !os.IsNotExist(removeErr) {
 		fmt.Printf("Warning: failed to remove PID file: %v\n", removeErr)
 	}
 

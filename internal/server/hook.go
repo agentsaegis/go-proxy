@@ -181,11 +181,22 @@ func (hh *HookHandler) HandlePreToolUse(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Populate session ID from hook request before resolving (thread-safe via engine mutex)
+	// Populate session ID from hook request (thread-safe via engine mutex)
 	hh.engine.SetActiveTrapSessionID(req.SessionID)
 
-	// Trap matched - developer approved the dangerous command
-	hh.callbackHandler.ResolveTrap(activeTrap, "missed")
+	// Flag the trap as hook-blocked but DON'T resolve yet.
+	// Resolution is deferred to the request-body path (when the next API
+	// request arrives with the tool_result). This is critical because VS Code
+	// Copilot fires the PreToolUse hook BEFORE the user approves/denies,
+	// while Claude Code fires it AFTER. Deferring resolution ensures the
+	// trap stays active long enough for the user to see the command and for
+	// the tool_result to arrive with the correct outcome.
+	activeTrap.HookBlocked.Store(true)
+
+	hh.logger.Info("hook blocked trap command (resolution deferred to request-body path)",
+		"trap_id", activeTrap.ID,
+		"trap_command", activeTrap.TrapCommand,
+	)
 
 	// Activate cooldown to prevent double-injection after block
 	hh.cooldownCount = hh.maxCooldown

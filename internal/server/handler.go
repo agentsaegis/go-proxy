@@ -462,8 +462,21 @@ func (ph *ProxyHandler) checkForTrapResult(body []byte) {
 			}
 
 			// Found the tool_result for our trap.
-			// Check content for rejection indicators to determine if the user
-			// denied the command (caught) vs approved it and it failed (missed).
+			// If the hook already blocked this command, the result is always
+			// "missed" - the trap matched and would have executed without the
+			// hook. The tool_result just confirms the block happened.
+			if activeTrap.HookBlocked.Load() {
+				ph.logger.Info("trap result detected from request body (hook-blocked)",
+					"trap_id", activeTrap.ID,
+					"tool_use_id", activeTrap.ToolUseID,
+					"result", "missed",
+				)
+				ph.callbackHandler.ResolveTrap(activeTrap, "missed")
+				return
+			}
+
+			// No hook block - check content for rejection indicators to
+			// determine if the user denied (caught) vs approved (missed).
 			// Trap commands target nonexistent paths so they always fail with
 			// is_error: true - we can't use is_error alone to distinguish.
 			result := "missed"

@@ -41,6 +41,7 @@ type ActiveTrap struct {
 	InjectedAt      time.Time
 	Triggered       atomic.Bool
 	Resolved        atomic.Bool
+	HookBlocked     atomic.Bool // Set when the PreToolUse hook matched and blocked the command
 }
 
 // Engine decides when to inject traps based on command frequency and configuration.

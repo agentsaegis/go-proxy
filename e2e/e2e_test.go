@@ -41,6 +41,25 @@ func mockAnthropicServer(t *testing.T) *httptest.Server {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+
+		// If the request contains a tool_result, return a text-only response
+		// to avoid triggering a new trap injection on the resolution path.
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		if strings.Contains(string(body), "tool_result") {
+			resp := map[string]interface{}{
+				"id": "msg_e2e_result", "type": "message", "role": "assistant",
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "Done."},
+				},
+				"model": "claude-sonnet-4-20250514", "stop_reason": "end_turn",
+				"usage": map[string]int{"input_tokens": 10, "output_tokens": 5},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
 		resp := map[string]interface{}{
 			"id": "msg_e2e", "type": "message", "role": "assistant",
 			"content": []interface{}{
@@ -266,6 +285,37 @@ func extractBashCommand(t *testing.T, resp map[string]interface{}) string {
 	return ""
 }
 
+// sendToolResult sends a follow-up API request containing a tool_result block for the
+// given tool_use_id. This triggers deferred trap resolution in the request-body path.
+func sendToolResult(t *testing.T, proxyURL, toolUseID string) {
+	t.Helper()
+	body := fmt.Sprintf(`{
+		"model": "claude-sonnet-4-20250514",
+		"max_tokens": 1024,
+		"messages": [
+			{"role": "user", "content": "list files"},
+			{"role": "assistant", "content": [{"type": "tool_use", "id": %q, "name": "bash", "input": {"command": "echo test"}}]},
+			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": %q, "is_error": true, "content": "command failed"}]}
+		]
+	}`, toolUseID, toolUseID)
+	req, err := http.NewRequest(http.MethodPost, proxyURL+"/v1/messages",
+		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "test-key")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("tool_result request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	// We don't care about the response - just triggering the trap resolution
+	_, _ = io.ReadAll(resp.Body)
+}
+
 // sendHookRequest sends a PreToolUse hook request and returns the parsed response.
 func sendHookRequest(t *testing.T, proxyURL, command string) map[string]interface{} {
 	return sendHookRequestWithID(t, proxyURL, command, "toolu_e2e_001")
@@ -352,6 +402,9 @@ func TestFullTrapLifecycle(t *testing.T) {
 	if output["permissionDecision"] != "deny" {
 		t.Fatalf("expected deny, got: %v", output["permissionDecision"])
 	}
+
+	// 5b. Send a follow-up request with tool_result to trigger deferred resolution
+	sendToolResult(t, env.proxyURL, "toolu_e2e_001")
 
 	// 6. Assert: dashboard received the event (async, wait for it)
 	events := env.events.waitFor(t, 1, 5*time.Second)
@@ -862,6 +915,9 @@ func TestSuperDebugMode(t *testing.T) {
 		} else {
 			t.Fatalf("request %d: expected deny response, got allow", i+1)
 		}
+
+		// Send tool_result to trigger deferred resolution
+		sendToolResult(t, env.proxyURL, "toolu_e2e_001")
 
 		// Small delay for async cleanup
 		time.Sleep(50 * time.Millisecond)
