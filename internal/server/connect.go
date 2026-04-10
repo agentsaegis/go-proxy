@@ -688,22 +688,9 @@ func (ch *ConnectHandler) checkForOAIToolResult(body []byte) {
 			continue
 		}
 
-		// Found the tool result for our trap.
-		// If the hook already blocked this command, resolve as "missed".
-		if activeTrap.HookBlocked.Load() {
-			ch.logger.Info("OAI trap result detected (hook-blocked)",
-				"trap_id", activeTrap.ID,
-				"tool_call_id", activeTrap.ToolUseID,
-				"result", "missed",
-			)
-			ch.callbackHandler.ResolveTrap(activeTrap, "missed")
-			return
-		}
-
-		// No hook block - check for rejection indicators.
+		// Check for rejection indicators regardless of HookBlocked state.
 		result := "missed"
 		lower := strings.ToLower(msg.Content)
-		ch.logger.Debug("OAI tool result content", "tool_call_id", activeTrap.ToolUseID, "content_len", len(msg.Content))
 		if strings.Contains(lower, "user denied") ||
 			strings.Contains(lower, "user rejected") ||
 			strings.Contains(lower, "was rejected") ||
@@ -722,10 +709,12 @@ func (ch *ConnectHandler) checkForOAIToolResult(body []byte) {
 			result = "caught"
 		}
 
-		ch.logger.Info("OAI trap result detected from request body",
+		hookBlocked := activeTrap.HookBlocked.Load()
+		ch.logger.Info("OAI trap result detected",
 			"trap_id", activeTrap.ID,
 			"tool_call_id", activeTrap.ToolUseID,
 			"result", result,
+			"hook_blocked", hookBlocked,
 		)
 
 		ch.callbackHandler.ResolveTrap(activeTrap, result)
@@ -770,22 +759,9 @@ func (ch *ConnectHandler) checkForResponsesToolResult(body []byte) {
 			continue
 		}
 
-		if activeTrap.HookBlocked.Load() {
-			ch.logger.Info("Responses API trap result detected (hook-blocked)",
-				"trap_id", activeTrap.ID,
-				"tool_call_id", activeTrap.ToolUseID,
-				"result", "missed",
-			)
-			ch.callbackHandler.ResolveTrap(activeTrap, "missed")
-			return
-		}
-
+		// Check for rejection indicators regardless of HookBlocked state.
 		result := "missed"
 		lower := strings.ToLower(toolOutput.Output)
-		ch.logger.Debug("Responses API tool result content",
-			"tool_call_id", activeTrap.ToolUseID,
-			"output_len", len(toolOutput.Output),
-		)
 		if strings.Contains(lower, "user denied") ||
 			strings.Contains(lower, "user rejected") ||
 			strings.Contains(lower, "was rejected") ||
@@ -804,10 +780,12 @@ func (ch *ConnectHandler) checkForResponsesToolResult(body []byte) {
 			result = "caught"
 		}
 
+		hookBlocked := activeTrap.HookBlocked.Load()
 		ch.logger.Info("Responses API trap result detected",
 			"trap_id", activeTrap.ID,
 			"tool_call_id", activeTrap.ToolUseID,
 			"result", result,
+			"hook_blocked", hookBlocked,
 		)
 
 		ch.callbackHandler.ResolveTrap(activeTrap, result)
@@ -860,16 +838,6 @@ func (ch *ConnectHandler) checkForAnthropicToolResult(body []byte) {
 				continue
 			}
 
-			if activeTrap.HookBlocked.Load() {
-				ch.logger.Info("Anthropic trap result detected (hook-blocked)",
-					"trap_id", activeTrap.ID,
-					"tool_use_id", activeTrap.ToolUseID,
-					"result", "missed",
-				)
-				ch.callbackHandler.ResolveTrap(activeTrap, "missed")
-				return
-			}
-
 			// Content can be a string or an array of content blocks
 			contentStr := string(toolResult.Content)
 			var plainStr string
@@ -879,10 +847,6 @@ func (ch *ConnectHandler) checkForAnthropicToolResult(body []byte) {
 
 			result := "missed"
 			lower := strings.ToLower(contentStr)
-			ch.logger.Debug("Anthropic tool result content",
-				"tool_use_id", activeTrap.ToolUseID,
-				"content_len", len(contentStr),
-			)
 			if strings.Contains(lower, "user denied") ||
 				strings.Contains(lower, "user rejected") ||
 				strings.Contains(lower, "was rejected") ||
@@ -901,10 +865,12 @@ func (ch *ConnectHandler) checkForAnthropicToolResult(body []byte) {
 				result = "caught"
 			}
 
+			hookBlocked := activeTrap.HookBlocked.Load()
 			ch.logger.Info("Anthropic trap result detected",
 				"trap_id", activeTrap.ID,
 				"tool_use_id", activeTrap.ToolUseID,
 				"result", result,
+				"hook_blocked", hookBlocked,
 			)
 
 			ch.callbackHandler.ResolveTrap(activeTrap, result)
