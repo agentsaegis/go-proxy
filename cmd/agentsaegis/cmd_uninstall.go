@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -146,28 +147,23 @@ func untrustCA() error {
 				}
 			}
 		}
-		// Remove all copies by certificate name from system keychain (works even if
-		// ~/.agentsaegis/ was already deleted). Multiple copies can exist from
-		// repeated trust-cert runs; delete-certificate only removes one at a time.
+		// Remove all copies by SHA-1 hash from system keychain (works even if
+		// ~/.agentsaegis/ was already deleted). delete-certificate -c fails with
+		// "ambiguous" when multiple certs share the same CN, so we find each hash
+		// and delete by hash individually.
 		if !removed {
-			// Check if any cert exists in the keychain first
-			check := exec.Command("security", "find-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
-			if checkErr := check.Run(); checkErr != nil {
+			hashes := findCAHashes()
+			if len(hashes) == 0 {
 				fmt.Println("skipped (no CA in keychain)")
 				return nil
 			}
-			for {
-				cmd := exec.Command("sudo", "security", "delete-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
+			for _, hash := range hashes {
+				cmd := exec.Command("sudo", "security", "delete-certificate", "-Z", hash, "/Library/Keychains/System.keychain")
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
 				cmd.Stdin = os.Stdin
 				if err := cmd.Run(); err != nil {
-					return fmt.Errorf("failed to remove CA from keychain (run with sudo): %w", err)
-				}
-				// Check if more copies remain
-				recheck := exec.Command("security", "find-certificate", "-c", "AgentsAegis Proxy CA", "/Library/Keychains/System.keychain")
-				if recheck.Run() != nil {
-					break // no more copies
+					return fmt.Errorf("failed to remove CA %s from keychain (run with sudo): %w", hash, err)
 				}
 			}
 		}
@@ -180,6 +176,25 @@ func untrustCA() error {
 	}
 
 	return nil
+}
+
+// findCAHashes returns SHA-1 hashes of all AgentsAegis Proxy CA certs in the system keychain.
+func findCAHashes() []string {
+	out, err := exec.Command("security", "find-certificate", "-a", "-c", "AgentsAegis Proxy CA", "-Z", "/Library/Keychains/System.keychain").Output()
+	if err != nil {
+		return nil
+	}
+	var hashes []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "SHA-1 hash:") {
+			hash := strings.TrimSpace(strings.TrimPrefix(line, "SHA-1 hash:"))
+			if hash != "" {
+				hashes = append(hashes, hash)
+			}
+		}
+	}
+	return hashes
 }
 
 // removeAegisDir removes the ~/.agentsaegis/ directory entirely.
